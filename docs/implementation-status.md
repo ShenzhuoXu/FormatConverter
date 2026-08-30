@@ -8,7 +8,7 @@
 | Step | 描述 | 状态 | 提交 | 验收 |
 | ---- | ---- | ---- | ---- | ---- |
 | Step 0 | 固化现有 CLI 与 AI 校对功能（ai-clean / OrcaRouter） | ✅ 通过 | `4834b2d`（功能）+ `973ff35`（硬化修复） | 103 tests 全绿，独立审查通过 |
-| Step 1 | （待工作单） | ⬜ 未开始 | — | — |
+| Step 1 | 工程化与持续集成（pytest 配置 / 依赖划分 / GitHub Actions） | ✅ 通过 | `e72eaa4` | 103 tests 全绿，独立审查通过 |
 | Step 2 | （待工作单） | ⬜ 未开始 | — | — |
 | Step 3 | （待工作单） | ⬜ 未开始 | — | — |
 | Step 4 | （待工作单） | ⬜ 未开始 | — | — |
@@ -51,4 +51,41 @@
 - `.idea/` 已从跟踪移除（`bb72f96`）且在 `.gitignore`；`.pytest-tmp` 测试后即删除，未入库。
 
 ### 注意事项
-- 现有功能提交 `4834b2d` 的 message 与工作单指定文案（`feat: add optional OrcaRouter AI Markdown proofreading`）不完全一致；是否 amend 改名待用户确认（见交付汇报）。
+- 现有功能提交 `4834b2d` 的 message 与工作单指定文案（`feat: add optional OrcaRouter AI Markdown proofreading`）不完全一致；用户已确认**保持现状，不 amend / rebase / 改写历史**。
+
+---
+
+## Step 1 — 工程化与持续集成
+
+### 状态：✅ 验收通过（2026-08-30）
+
+### 范围
+- 统一 pytest 配置；运行/测试依赖划分；Windows GitHub Actions 测试工作流；.gitignore 覆盖测试/Web 临时目录与缓存；README 新增「开发与测试」章节。未改动核心功能与 tests/。
+
+### 提交
+- `e72eaa4` `chore: add project test and CI foundation`（6 文件，+93/−1）
+
+### 改动内容
+- `pytest.ini`（新增）：`testpaths = tests`、`pythonpath = .`，无绝对路径；不全局禁用 cacheprovider（开发者 `--lf`/`--ff` 可用）。
+- `requirements.txt`（修改）：移除 `pytest==9.1.1`，仅保留运行依赖（pymupdf4llm / marker-pdf / openai，版本号未变）。
+- `requirements-dev.txt`（新增）：`pytest==9.1.1`。
+- `.github/workflows/tests.yml`（新增）：`windows-latest`，Python matrix 3.12/3.13，`actions/checkout@v6` + `actions/setup-python@v6`（Node 24 运行时），步骤为升级 pip → 装运行依赖 → 装开发依赖 → `python -m pytest` → `python -m compileall -q .`。注释说明 marker-pdf 重依赖取舍与 Windows+3.13 残余风险。
+- `.gitignore`（修改）：新增 `.pytest-tmp/` 与 Web 临时目录占位 `web_uploads/`、`web_outputs/`（注释独立成行，规避行尾注释坑）。
+- `README.md`（修改）：新增「开发与测试」章节（Python 版本建议、venv 与两份依赖安装、离线测试、compileall、CI Windows runner）。
+
+### 测试证据
+- 最终门禁：`pytest` → `103 passed in 0.93s`（`configfile: pytest.ini`）；`compileall -q .` → 0；`git diff --check` → 通过（仅 autocrlf LF→CRLF 提示）。
+- YAML 校验：系统 python + PyYAML 6.0.3 `yaml.safe_load` → `YAML OK`。
+- `git check-ignore`：`.pytest-tmp/`、`.pytest_cache/`、`web_uploads/`、`.idea/` 等全部命中。
+- 新增/修改文件 grep `C:\|C:/|/Users/` 0 命中（无用户绝对路径）。
+- 依赖闭环核验：`tests/test_llm_client.py` 顶层 `import httpx2`，而 `httpx2` 是 `openai==3.6.0` 的传递依赖（`httpx2<3,>=2.7.0`），CI 安装 requirements.txt 后自动可用，无缺口。
+
+### 审查结论
+- 独立审查 agent（对抗式）第一轮：**P0 无、P1 1 项、P2 多项**。
+  - **P1（阻断）**：`actions/checkout@v4`/`actions/setup-python@v5` 基于 Node 20 运行时，GitHub 将于 2026-09-16 移除 Node 20。已主控独立核验 `@v6` 存在（Node 24）→ 实现 agent 升级为 `checkout@v6`、`setup-python@v6`。
+  - **P2**：pytest.ini 全局 `-p no:cacheprovider` 使开发者 `--lf`/`--ff` 退化（已移除 addopts）；marker-pdf 重依赖与 Windows+3.13 可安装性未验证（已以 YAML 注释 + README 提示文档化，非阻塞）。
+  - **P3**：README 未提及 marker-pdf 体积（已补提示）。
+- 修复后复审：**验收通过，无 P0/P1/P2**。复核确认 action v6、pytest.ini 精简、注释/README 如实、回归全绿；残余风险 marker-pdf Windows+3.13 需首次真实 CI 运行确认（本阶段不得 push，无法在本地触发 CI）。
+
+### 注意事项
+- CI 无法在本机真实运行（不得 push / 不得创建 PR）；YAML 有效性已静态校验，真实 runner 首跑应确认 marker-pdf 在 Windows + Python 3.13 的安装可行性。
