@@ -15,6 +15,10 @@
 # 忽略 Markdown 清理脚本生成的备份文件
 *.bak.md
 
+# Web 临时目录占位（后续 Web Step 会具体化，先忽略常见上传/输出目录）
+web_uploads/
+web_outputs/
+
 
 # -----------------------------------------------------------------------------
 # 2. Python 通用忽略
@@ -42,6 +46,8 @@ build/
 
 # 单元测试和覆盖率报告
 .pytest_cache/
+# pytest --basetemp 测试临时目录
+.pytest-tmp/
 htmlcov/
 .coverage
 .coverage.*

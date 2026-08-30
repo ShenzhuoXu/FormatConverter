@@ -1,0 +1,42 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Test on ${{ matrix.python-version }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      # 设计取舍（按 Step 1 工作单）：测试因惰性导入实际只需 openai + pytest，
+      # 但仍按要求安装全部运行依赖 requirements.txt。marker-pdf 会拉取
+      # torch/transformers/onnxruntime 等重依赖（约 2-3 GB），Windows 下安装可能较慢。
+      # 残余风险：marker-pdf==1.10.2 在 Windows + Python 3.13 上的可安装性未经验证
+      # （本地 venv 未安装 marker-pdf，且验收红线禁止 pip install，无法在本机验证）。
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Install dev dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Byte-compile all modules
+        run: python -m compileall -q .

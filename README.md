@@ -110,6 +110,47 @@ $env:ORCAROUTER_API_KEY = "你的-key"
 
 测试全部离线运行：使用 fake/injected 客户端，不联网、不依赖真实 API Key。
 
+## 开发与测试
+
+### Python 版本建议
+
+建议使用 Python 3.11 或更高版本；本地已在 Python 3.13 下测试通过，CI 会额外覆盖 Python 3.12。
+
+### 环境准备
+
+在项目根目录创建并激活虚拟环境，然后安装依赖：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+```
+
+- `requirements.txt`：运行依赖（PDF 转换与 AI 校对所需）。
+- `requirements-dev.txt`：开发/测试依赖（目前仅 `pytest`）。
+
+> 注意：`requirements.txt` 含 `marker-pdf`，会拉取 `torch`/`transformers`/`onnxruntime` 等重依赖，首次安装可能较慢、体积较大。若只需运行测试，装 `openai` + `pytest`（`requirements-dev.txt`）即可。
+
+### 运行测试
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+```
+
+测试全部离线运行：使用 fake/injected 客户端，不联网、不依赖真实 API Key。
+
+### 语法检查
+
+对全项目做一次字节码编译，确认所有模块可被 Python 正常解析：
+
+```powershell
+.\.venv\Scripts\python.exe -m compileall -q .
+```
+
+### 持续集成
+
+GitHub Actions 工作流（`.github/workflows/tests.yml`）会在 `windows-latest` runner 上、对 Python 3.12 与 3.13 运行同样的命令：安装 `requirements.txt` 与 `requirements-dev.txt` 后执行 `python -m pytest` 和 `python -m compileall -q .`。
+
 ## 维护说明
 
 原来的脚本已经改成兼容入口。以后需要改转换逻辑时，优先修改 `format_converter/pdf_converter.py`；需要改 Markdown 清理规则时，优先修改 `format_converter/markdown_cleaner.py`；需要调整 AI 校对（分块、提示词、Provider 预设、客户端封装）时，优先修改 `format_converter/ai_cleaner.py`、`format_converter/providers.py` 和 `format_converter/llm_client.py`，并同步更新 `tests/`。
