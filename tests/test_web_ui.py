@@ -31,6 +31,11 @@ APP_JS = STATIC_DIR / "app.js"
 STYLES_CSS = STATIC_DIR / "styles.css"
 
 
+def _is_same_origin_static(url: str) -> bool:
+    """True only for a same-origin ``/static/`` path (never external/CDN)."""
+    return url.startswith("/static/") and not url.startswith("//")
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -128,6 +133,18 @@ class TestStaticServing:
         assert status == 200
         assert json.loads(data.decode("utf-8")) == {"status": "ok"}
 
+    def test_referenced_assets_are_servable(self, server) -> None:
+        # Regression: the page must load in a real browser, so every
+        # /static/ asset the served index.html references must return 200.
+        status, _, data = _request(server.port, "GET", "/")
+        assert status == 200
+        html = data.decode("utf-8")
+        refs = re.findall(r'(?:src|href)="(/static/[^"]+)"', html)
+        assert refs, "page references no /static/ assets"
+        for ref in refs:
+            s, _, _ = _request(server.port, "GET", ref)
+            assert s == 200, f"page-referenced asset is not servable: {ref}"
+
 
 # ---------------------------------------------------------------------------
 # page-source compliance (no localStorage / external links / third parties)
@@ -145,16 +162,18 @@ class TestPageSourceCompliance:
         for tag in scripts:
             m = re.search(r'\bsrc\s*=\s*"([^"]*)"', tag)
             assert m is not None, f"script tag without src: {tag}"
-            assert not m.group(1).startswith(("http://", "https://", "//", "/"))
-            assert m.group(1) == "app.js"
+            assert _is_same_origin_static(m.group(1)), (
+                f"script src must be a same-origin /static/ path: {m.group(1)!r}"
+            )
 
         links = re.findall(r"<link\b[^>]*>", html)
         assert links, "index.html has no <link> tag at all"
         for tag in links:
             m = re.search(r'\bhref\s*=\s*"([^"]*)"', tag)
             assert m is not None, f"link tag without href: {tag}"
-            assert not m.group(1).startswith(("http://", "https://", "//", "/"))
-            assert m.group(1) == "styles.css"
+            assert _is_same_origin_static(m.group(1)), (
+                f"link href must be a same-origin /static/ path: {m.group(1)!r}"
+            )
 
     def test_app_js_has_no_forbidden_content(self) -> None:
         js = APP_JS.read_text(encoding="utf-8")

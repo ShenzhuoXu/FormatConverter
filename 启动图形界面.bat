@@ -60,13 +60,13 @@ REM --- Optional dependency checks (non-fatal, continue anyway) ---
 "%PY%" %PYARGS% -c "import openai" >nul 2>nul
 if errorlevel 1 (
     echo.
-    echo [NOTE] 'openai' is missing: AI proofreading (ai-clean) will not work.
+    echo [NOTE] openai is missing: the AI proofreading card will not work.
     echo        To install:  .venv\Scripts\python.exe -m pip install -r requirements.txt
 )
 "%PY%" %PYARGS% -c "import pymupdf4llm" >nul 2>nul
 if errorlevel 1 (
     echo.
-    echo [NOTE] 'pymupdf4llm' is missing: PDF conversion (convert/pipeline) will not work.
+    echo [NOTE] pymupdf4llm is missing: PDF conversion will not work.
     echo        To install:  .venv\Scripts\python.exe -m pip install -r requirements.txt
 )
 
