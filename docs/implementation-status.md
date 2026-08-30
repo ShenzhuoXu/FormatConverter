@@ -12,6 +12,7 @@
 | Step 2 | 任务服务层（jobs.py：CLI 与未来 Web UI 复用） | ✅ 通过 | `735cc7b` | 118 tests 全绿，独立审查通过 |
 | Step 3 | 本机 Web 服务（web_server.py：仅回环访问的任务 API） | ✅ 通过 | `fba444a` | 145 tests 全绿，独立审查通过 |
 | Step 4 | 中文单页 Web UI（四张功能卡片） | ✅ 通过 | `4dd840e` | 155 tests 全绿，独立审查通过 |
+| Step 5 | Windows 一键启动（启动图形界面.bat + 启动层） | ✅ 通过 | `f0f6fdf` | 169 tests 全绿，独立审查通过 |
 | Step 2 | （待工作单） | ⬜ 未开始 | — | — |
 | Step 3 | （待工作单） | ⬜ 未开始 | — | — |
 | Step 4 | （待工作单） | ⬜ 未开始 | — | — |
@@ -198,3 +199,36 @@
 
 ### 注意事项
 - 验收项「用浏览器手工验证四张卡片的提交、状态与下载流程」属**用户侧手工验证**：自动化已用 http.client 复现同 API 流程并全部通过，但真实浏览器点击验证待用户执行（可运行 `main.py` 或 Step 5 的启动脚本后打开 `http://127.0.0.1:8765/`）。
+
+---
+
+## Step 5 — Windows 一键启动图形界面
+
+### 状态：✅ 验收通过（2026-08-31）
+
+### 范围
+- 新增 `启动图形界面.bat`（一键启动）+ `打开我.html`（服务未启动时的说明页）；`web_server.py` 新增可测试的「启动层」；未改变 API 契约与既有行为。
+
+### 提交
+- `f0f6fdf` `feat: add Windows launcher for local web UI`（4 文件，+720/−1）
+
+### 改动内容
+- `启动图形界面.bat`：Python 探测顺序 ①`.venv\Scripts\python.exe` ②`py -3` ③`python`；**绝不执行 pip install**（只 echo 可复制安装命令）；找不到 Python/核心依赖缺失 → 打印 venv 创建 + 两份 requirements 安装命令并 pause 退出非 0；openai/pymupdf4llm 缺失仅警告并继续；前台运行 `python -m format_converter.web_server`（同窗口=服务窗口，显示「Press Ctrl+C to stop」）；`FC_TEST_PYTHON`/`FC_TEST_NO_PAUSE` 测试钩子。编码选纯 ASCII（独立实验证明 UTF-8+chcp 65001 会破坏 cmd 对 goto 标签后文件的重读解析）。
+- `format_converter/web_server.py`（新增启动层，既有类/方法零改动）：`run_server(preferred_port=8765, open_browser=True, max_backup_ports=5)`——优先端口 → 已被本服务健康实例占用则**复用不新建**（重复启动不会产生多个不可访问实例）→ 绑定 OSError 竞态走同一路径 → 其它程序占用则依次备用端口并明确提示 → 全部占用抛清晰 `ServerStartError`；绑定后轮询 `/health`（30s 超时）→ 打印「服务已就绪：http://127.0.0.1:<端口>/」与「按 Ctrl+C 停止」→ `webbrowser.open`（**URL 恒为 127.0.0.1**，绝不公网）→ Ctrl+C 干净 `shutdown()` 退出 0；`main()`/`__main__`（argparse：--port/--no-browser/--max-backup-ports）。
+- `打开我.html`：纯静态说明页（非应用入口），无表单/脚本/localStorage/CDN；说明启动方式、前置条件、仅监听 127.0.0.1。
+- `tests/test_launcher.py`（新增，14 测试）：正常启动/浏览器 URL 回环、--no-browser、端口复用（不新建）、占用回退、全占用报错、负数参数、main 退出码、Ctrl+C 干净退出（临时根删除、无残留线程）、`_health_ok` 正反例、BAT 依赖缺失分支冒烟（复制到 ASCII 临时名调用 cmd /c call）。
+
+### 测试证据
+- 最终门禁：`pytest` → `169 passed in 27.82s`（155 + 14）；`compileall -q .` → 0；`git diff --check` → 通过；`python -m format_converter.web_server --help` 可用。
+- 独立核验：BAT 逐行确认零 pip install；冒烟验证依赖缺失分支输出安装命令 + 退出码 1；端口复用/回退/竞态路径实测；URL 恒为 127.0.0.1；Ctrl+C 后临时根删除、无残留线程。
+
+### 审查结论
+- 独立审查 agent（对抗式）第一轮：**P0 无、P1 无、P2 3 项**，结论「验收通过」。
+  - **P2-1**：BAT 冒烟测试依赖 8.3 短文件名，`NtfsDisable8dot3NameCreation=1` 时可能误失败 → 修复：改为复制到 ASCII 临时名再调用，完全脱离 8.3 依赖。
+  - **P2-2**：`py` 存在但无 Python 3 时误报「Core dependency missing」措辞 → 修复：改为「Python 3 or the project dependencies are not ready」（同时覆盖两种情形），安装命令不变。
+  - **P2-3**：编码选型——审查独立实验确认 ASCII 英文是正确且健壮的选型，无需改动。
+- 修复后复审：**验收通过，无剩余 P0/P1/P2**。
+
+### 注意事项
+- 「Windows 双击 BAT 可启动服务并打开浏览器」属**用户侧手工验证**：自动化已覆盖 BAT 依赖缺失分支冒烟与启动层全部逻辑，真实双击体验待用户确认（双击 `启动图形界面.bat` 即可）。
+- BAT 提示为英文（ASCII 稳健性优先）；页面与运行消息仍为中文。
