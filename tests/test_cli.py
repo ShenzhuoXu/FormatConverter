@@ -219,6 +219,25 @@ class TestAIClean:
         assert "UTF-8" in str(excinfo.value)
         assert not (tmp_path / "gbk.ai.md").exists()
 
+    def test_whitespace_only_input_written_verbatim_without_client(self, tmp_path: Path) -> None:
+        # Blank-only Markdown has nothing to proofread: the original bytes must
+        # be written out exactly (newline style included) and the LLM client
+        # must never be called.
+        src = tmp_path / "blank.md"
+        src.write_bytes(b" \r\n\t \r\n")
+        calls: list[dict] = []
+
+        class NoopClient:
+            def complete(self, *, system: str, user: str, model: str) -> str:  # pragma: no cover
+                calls.append({"system": system, "user": user, "model": model})
+                return "MUST NOT BE USED"
+
+        out = ai_clean(src, "orcarouter", "m1", client=NoopClient())
+        assert out == src.with_suffix(".ai.md")
+        assert out.read_bytes() == b" \r\n\t \r\n"
+        assert src.read_bytes() == b" \r\n\t \r\n"  # original untouched
+        assert calls == []
+
 
 class TestMainAIClean:
     def test_success_returns_zero(

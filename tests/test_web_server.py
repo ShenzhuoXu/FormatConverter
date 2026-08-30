@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from format_converter.web_server import JobWebServer, create_server
+from format_converter.web_server import MAX_BODY_BYTES, JobWebServer, create_server
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +67,37 @@ def _wait_terminal(port: int, job_id: str, timeout: float = 15.0) -> dict:
         if time.monotonic() > deadline:
             raise AssertionError(f"job {job_id} did not finish in {timeout}s: {payload}")
         time.sleep(0.05)
+
+
+def _fake_convert_file(pdf_path, output_dir, overwrite: bool = False) -> Path:
+    """Stand-in for convert_pdf_file that writes a fake Markdown output."""
+    pdf_path = Path(pdf_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / f"{pdf_path.stem}.md"
+    out.write_text("# converted", encoding="utf-8")
+    return out
+
+
+def _fake_run_pipeline(pdf_dir, md_dir, overwrite: bool = False, keep_lists: bool = True,
+                       dedupe: bool = True, backup: bool = True) -> tuple[list[Path], list[Path]]:
+    """Stand-in for run_pipeline used by the web 'pipeline' job handler."""
+    md_dir = Path(md_dir)
+    md_dir.mkdir(parents=True, exist_ok=True)
+    converted = md_dir / "doc.md"
+    converted.write_text("# pipelined", encoding="utf-8")
+    cleaned = md_dir / "doc.cleaned.md"
+    cleaned.write_text("# cleaned", encoding="utf-8")
+    return [converted], [cleaned]
+
+
+def _fake_ai_clean(file, provider: str, model: str, *, output=None,
+                   overwrite: bool = False, client=None) -> Path:
+    """Stand-in for cli.ai_clean used by the web 'ai-clean' job handler."""
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("# ai cleaned", encoding="utf-8")
+    return output
 
 
 @pytest.fixture
@@ -244,6 +275,145 @@ class TestFailures:
         server, port = make_server()
         status, _, _ = _post_job(port, "convert", {}, "doc.pdf", "")
         assert status == 400
+
+
+# ---------------------------------------------------------------------------
+# additional end-to-end paths (convert / pipeline / ai-clean / edge cases)
+# ---------------------------------------------------------------------------
+
+
+class TestAdditionalE2E:
+    def test_convert_success_e2e(self, make_server, monkeypatch) -> None:
+        # The real pymupdf4llm is not installed; the worker is faked while the
+        # whole web path (upload -> job -> status -> download ZIP) is exercised.
+        monkeypatch.setattr("format_converter.jobs.convert_pdf_file", _fake_convert_file)
+        server, port = make_server()
+
+        status, _, data = _post_job(port, "convert", {}, "doc.pdf", "%%PDF fake")
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        assert headers["Content-Type"] == "application/zip"
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            assert archive.namelist() == ["output/doc.md"]
+            assert archive.read("output/doc.md").decode("utf-8") == "# converted"
+
+    def test_pipeline_success_e2e(self, make_server, monkeypatch) -> None:
+        monkeypatch.setattr("format_converter.jobs.run_pipeline", _fake_run_pipeline)
+        server, port = make_server()
+
+        status, _, data = _post_job(port, "pipeline", {}, "doc.pdf", "%%PDF fake")
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        assert headers["Content-Type"] == "application/zip"
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            assert "output/doc.md" in archive.namelist()
+            assert archive.read("output/doc.md").decode("utf-8") == "# pipelined"
+
+    def test_ai_clean_success_e2e(self, make_server, monkeypatch) -> None:
+        # The web layer resolves the API key inside jobs; a faked ai_clean keeps
+        # the test fully offline while still exercising the full web path.
+        monkeypatch.setattr("format_converter.jobs.ai_clean", _fake_ai_clean)
+        server, port = make_server()
+
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"}, "doc.md", "# Alpha"
+        )
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        assert headers["Content-Type"] == "application/zip"
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            assert archive.namelist() == ["output/doc.ai.md"]
+            assert archive.read("output/doc.ai.md").decode("utf-8") == "# ai cleaned"
+
+    def test_download_succeeded_but_no_output_files_404(self, make_server) -> None:
+        server, port = make_server()
+        manager = server._manager
+        # A handler that succeeds with zero output paths.
+        manager.handlers["clean"] = lambda _params: ((), "no outputs")
+
+        status, _, data = _post_job(port, "clean", {}, "doc.md", "# x")
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+        # Succeeded but nothing to package -> 404 "No output files available."
+        status, _, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 404
+        assert "No output files available" in data.decode("utf-8")
+
+    def test_string_bool_lookalikes_do_not_flip_behavior(self, make_server) -> None:
+        # "false"/"true" strings are not genuine booleans: the web layer must
+        # keep the defaults (dedupe on, backup on) rather than silently flip.
+        # Black-box note: this asserts observable behavior (dedupe + backup ran
+        # despite a string "false"); it does not assert the exact internal
+        # coercion path. The JobManager docstring is the authoritative statement
+        # that booleans must be real Python bools.
+        server, port = make_server()
+        content = "# Doc\n\nAlpha.\n\nAlpha.\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "clean", {"dedupe": "false", "backup": "false"}, "doc.md", content
+        )
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+
+        job_dir = server.base_temp_dir / job_id
+        assert (job_dir / "input" / "doc.bak.md").is_file()  # backup ran (default True)
+
+        status, _, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            extracted = archive.read("input/doc.md").decode("utf-8")
+        assert extracted.count("Alpha.") == 1  # dedupe still ran (default True)
+
+
+class TestOversizedBody:
+    def test_oversized_request_body_413(self, make_server) -> None:
+        server, port = make_server()
+        # Send only the headers with an oversized Content-Length. The handler
+        # rejects with 413 before reading the (un-sent) body.
+        header = (
+            "POST /api/jobs HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {MAX_BODY_BYTES + 1}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("utf-8")
+        sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+        try:
+            sock.sendall(header)
+            data = b""
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            sock.close()
+        assert b"413" in data
+        assert b"Request body too large" in data
 
 
 # ---------------------------------------------------------------------------

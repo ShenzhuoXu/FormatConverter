@@ -110,6 +110,31 @@ $env:ORCAROUTER_API_KEY = "你的-key"
 
 测试全部离线运行：使用 fake/injected 客户端，不联网、不依赖真实 API Key。
 
+## Windows 一键启动与手工验证
+
+### 双击启动（手工验收项）
+
+1. 在项目根目录**双击** `启动图形界面.bat`。
+2. 预期现象：
+   - 弹出一个命令行**服务窗口**，先后显示「Using Python …」「Starting FormatConverter local service…」「服务已就绪：http://127.0.0.1:8765/」「按 Ctrl+C 停止」。
+   - 默认浏览器自动打开 `http://127.0.0.1:8765/`，页面加载出「FormatConverter」四张功能卡片。
+3. **保持该窗口前台运行**：它就是服务进程本体；关闭或 Ctrl+C 即停止服务。
+4. **停止方式**：在服务窗口按 **Ctrl+C**，窗口会打印「收到 Ctrl+C，正在停止服务...」后退出，下次可重新双击启动。
+
+### 端口占用行为
+
+- 若 `8765` 已被**本服务**的另一个实例占用：BAT 会提示「服务已在运行：http://127.0.0.1:8765/」并直接复用，**不会**重复启动一个无法访问的实例。
+- 若 `8765` 被**其它程序**占用：自动依次尝试 `8766` 等备用端口，并提示「端口 8765 被占用，改用端口 …」。
+- 若首选及备用端口全被占用：BAT 会打印明确错误提示（含端口范围与建议），以非零码退出。
+
+### 依赖缺失提示
+
+- 找不到 Python：提示安装 Python 3.11+，并给出可复制的环境准备命令。
+- 核心依赖缺失（`import format_converter.web_server` 失败）：提示「Python 3 or the project dependencies are not ready」，并给出 `python -m venv .venv`、`pip install -r requirements.txt`、`pip install -r requirements-dev.txt` 三条命令，随后退出。
+- `openai` / `pymupdf4llm` 缺失：仅打印 [NOTE] 警告并**继续启动**（对应的 AI 校对 / PDF 转换卡片不可用，`clean` 与本地界面不受影响）。
+
+> 这是**手工验收项**：自动化测试已用 `http.client` 复现同一 API 流程（见 `docs/verification-checklist.md`），真实双击与浏览器点击体验请按上述步骤确认。
+
 ## 开发与测试
 
 ### Python 版本建议
