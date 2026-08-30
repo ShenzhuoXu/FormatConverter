@@ -147,12 +147,16 @@ def _scan_blocks(text: str) -> tuple[list[tuple[str, str]], str]:
                 elif not current.strip():
                     # A blank line belongs to the code block only if the next
                     # non-blank line is still indented (an interior blank).
+                    # All consecutive blank lines share the same next non-blank
+                    # line, so scan the whole run once (O(run)) and either take
+                    # every blank into the block or end the block at the first
+                    # blank — re-scanning from each blank would be O(run^2).
                     j = i
                     while j < n and not lines[j].strip():
                         j += 1
                     if j < n and _is_indented(lines[j]):
-                        content.append(current)
-                        i += 1
+                        content.extend(lines[i:j])
+                        i = j
                     else:
                         break
                 else:

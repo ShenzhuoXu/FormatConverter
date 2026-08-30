@@ -8,6 +8,7 @@ import pytest
 
 from format_converter.ai_cleaner import ChunkTooLargeError
 from format_converter.cli import (
+    EncodingError,
     NotMarkdownError,
     OverwriteError,
     ai_clean,
@@ -210,6 +211,14 @@ class TestAIClean:
         assert out.read_bytes() == b"[revised] Title.\r\n\r\nBody.\r\n"
         assert src.read_bytes() == b"Title.\r\n\r\nBody.\r\n"  # original untouched
 
+    def test_non_utf8_input_raises_encoding_error(self, tmp_path: Path) -> None:
+        src = tmp_path / "gbk.md"
+        src.write_bytes("中文内容".encode("gbk"))
+        with pytest.raises(EncodingError) as excinfo:
+            ai_clean(src, "orcarouter", "m1", client=EchoClient())
+        assert "UTF-8" in str(excinfo.value)
+        assert not (tmp_path / "gbk.ai.md").exists()
+
 
 class TestMainAIClean:
     def test_success_returns_zero(
@@ -284,3 +293,19 @@ class TestMainAIClean:
         assert ".md" in err
         assert "Traceback" not in err
         assert not (tmp_path / "notes.ai.md").exists()
+
+    def test_non_utf8_input_reports_encoding_error_without_traceback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        src = tmp_path / "gbk.md"
+        src.write_bytes("中文内容".encode("gbk"))
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-test")
+        monkeypatch.setattr("format_converter.cli.OpenAICompatClient", EchoClient)
+        rc = main(
+            ["ai-clean", "--file", str(src), "--provider", "orcarouter", "--model", "m1"]
+        )
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "UTF-8" in err
+        assert "Traceback" not in err
+        assert not (tmp_path / "gbk.ai.md").exists()

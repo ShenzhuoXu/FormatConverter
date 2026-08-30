@@ -91,6 +91,10 @@ class NotMarkdownError(Exception):
     """Raised when ``ai-clean`` receives an input file that is not a ``.md`` file."""
 
 
+class EncodingError(Exception):
+    """Raised when ``ai-clean`` cannot decode an input file as UTF-8."""
+
+
 def default_output_path(path: Path) -> Path:
     """Default AI proofreading output: ``<name>.md`` -> ``<name>.ai.md``."""
     if path.suffix.lower() == ".md":
@@ -143,7 +147,13 @@ def ai_clean(
 
     # newline="" keeps CRLF/CR line endings untranslated so the AI proofreader
     # (and therefore the output) preserves the input's newline style exactly.
-    markdown = input_path.read_text(encoding="utf-8", newline="")
+    try:
+        markdown = input_path.read_text(encoding="utf-8", newline="")
+    except UnicodeDecodeError as exc:
+        raise EncodingError(
+            f"Could not decode {input_path} as UTF-8. "
+            "The file uses a different text encoding; re-save it as UTF-8 and try again."
+        ) from exc
     revised = clean_markdown_with_ai(markdown, client, model=model)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -209,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
                 output=args.output,
                 overwrite=args.overwrite,
             )
-        except (ProviderError, LLMClientError, AICleanError, OverwriteError, NotMarkdownError) as exc:
+        except (ProviderError, LLMClientError, AICleanError, EncodingError, OverwriteError, NotMarkdownError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         except (FileNotFoundError, IsADirectoryError) as exc:

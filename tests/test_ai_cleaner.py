@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 import pytest
 
@@ -163,6 +164,18 @@ class TestSplitIntoChunks:
         text = "    one\n    two\n\n    three"
         chunks, _ = split_into_chunks(text, max_chars=1000)
         assert chunks == ["    one\n    two\n\n    three"]
+
+    def test_large_interior_blank_run_is_atomic_and_fast(self) -> None:
+        # A long run of blank lines inside an indented code block must be
+        # handled in O(run) time (a re-scan from every blank line would be
+        # O(run^2) and take seconds), while staying byte-exact and atomic.
+        blank_run = "\n" * 20_000
+        text = "    one" + blank_run + "    two"
+        start = time.perf_counter()
+        chunks, _ = split_into_chunks(text, max_chars=1_000_000)
+        elapsed = time.perf_counter() - start
+        assert chunks == [text]  # whole block intact, including every blank line
+        assert elapsed < 5.0  # O(run^2) regressions would blow far past this
 
     def test_indented_backticks_do_not_close_fence(self) -> None:
         # A 4-space-indented ``` line inside a fence is code, not the closer.

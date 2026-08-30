@@ -22,7 +22,11 @@ class LLMClientError(Exception):
 
 
 class AuthenticationError(LLMClientError):
-    """The provider rejected the API key (HTTP 401/403)."""
+    """The provider rejected the API key (HTTP 401)."""
+
+
+class PermissionDeniedError(LLMClientError):
+    """The provider accepted the key but it lacks access (HTTP 403)."""
 
 
 class RateLimitError(LLMClientError):
@@ -97,6 +101,12 @@ class OpenAICompatClient:
         except openai.APIConnectionError as exc:
             raise ConnectionFailedError(
                 f"Could not connect to provider {provider_name!r}. Check your network connection."
+            ) from exc
+        except openai.PermissionDeniedError as exc:
+            raise PermissionDeniedError(
+                f"Provider {provider_name!r} denied access (HTTP 403): the API key is "
+                f"valid but lacks permission to use this model or endpoint. Check the "
+                f"account permissions linked to {self._provider.api_key_env_var}."
             ) from exc
         except openai.APIStatusError as exc:
             raise ServerError(

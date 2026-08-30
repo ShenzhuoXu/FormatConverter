@@ -39,7 +39,6 @@ class TestProviderLookup:
         assert "orcarouter" in str(excinfo.value)
 
     def test_first_release_only_accepts_orcarouter(self) -> None:
-        assert list(get_provider.__module__)  # sanity
         with pytest.raises(UnknownProviderError):
             get_provider("openai")
         with pytest.raises(UnknownProviderError):

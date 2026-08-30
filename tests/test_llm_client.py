@@ -14,6 +14,7 @@ from format_converter.llm_client import (
     EmptyResponseError,
     LLMClient,
     OpenAICompatClient,
+    PermissionDeniedError,
     RateLimitError,
     ServerError,
 )
@@ -85,6 +86,20 @@ class TestOpenAICompatClient:
             client.complete(system="s", user="u", model="m")
         assert SECRET not in str(excinfo.value)
         assert "ORCAROUTER_API_KEY" in str(excinfo.value)
+
+    def test_permission_error_mapped_and_key_not_leaked(self) -> None:
+        # 403 (PermissionDeniedError) is a sibling of AuthenticationError in
+        # openai's SDK and must not be swallowed by the generic APIStatusError
+        # branch into ServerError.
+        fake = _FakeCompletions(
+            raise_exc=_status_error(openai.PermissionDeniedError, 403)
+        )
+        client = make_client(fake)
+        with pytest.raises(PermissionDeniedError) as excinfo:
+            client.complete(system="s", user="u", model="m")
+        assert SECRET not in str(excinfo.value)
+        assert "403" in str(excinfo.value)
+        assert "permission" in str(excinfo.value).lower()
 
     def test_rate_limit_mapped_and_key_not_leaked(self) -> None:
         fake = _FakeCompletions(
