@@ -36,10 +36,13 @@ from pathlib import Path
 
 from .jobs import JobManager, JobStatus, UnknownJobTypeError
 
-__all__ = ["JobWebServer", "create_server"]
+__all__ = ["JobWebServer", "create_server", "DEFAULT_STATIC_DIR"]
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+
+# Packaged single-page UI, served by default when present.
+DEFAULT_STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
 
 # Only loopback addresses may ever be requested. Anything else is rejected at
 # construction/serve time with ValueError and the socket is never opened.
@@ -607,6 +610,18 @@ class JobWebServer:
     # -- misc ---------------------------------------------------------------
 
     def _send_index(self, handler: BaseHTTPRequestHandler) -> None:
+        # Prefer the packaged UI's index.html when a static dir is configured
+        # and actually contains one; otherwise fall back to the built-in page.
+        if self._static_dir is not None:
+            index = self._static_dir / "index.html"
+            if index.is_file():
+                try:
+                    data = index.read_bytes()
+                except OSError:
+                    pass
+                else:
+                    self._send_bytes(handler, 200, data, "text/html; charset=utf-8")
+                    return
         body = _INDEX_HTML.encode("utf-8")
         self._send_bytes(handler, 200, body, "text/html; charset=utf-8")
 
@@ -704,10 +719,15 @@ def create_server(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
     *,
-    static_dir: str | os.PathLike[str] | None = None,
+    static_dir: str | os.PathLike[str] | None = DEFAULT_STATIC_DIR,
     manager: JobManager | None = None,
 ) -> JobWebServer:
-    """Construct and start a :class:`JobWebServer`, returning the running server."""
+    """Construct and start a :class:`JobWebServer`, returning the running server.
+
+    ``static_dir`` defaults to the packaged ``format_converter/web/static``
+    directory so the single-page UI is served out of the box. Pass ``None`` to
+    disable static serving, or another directory to serve different assets.
+    """
     server = JobWebServer(host=host, port=port, static_dir=static_dir, manager=manager)
     server.serve()
     return server

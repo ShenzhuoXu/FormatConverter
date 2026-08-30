@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FormatConverter · 格式转换工作台</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <h1>FormatConverter</h1>
+    <p class="tagline">本地 PDF → Markdown 转换与清理工具，全部任务在本机回环地址上运行。</p>
+  </header>
+
+  <main class="layout">
+    <section class="notice" aria-labelledby="notice-title">
+      <h2 id="notice-title">网络 / 隐私 / 费用提示</h2>
+      <ul>
+        <li>除「AI 校对」外的所有任务只在本机处理，上传内容不会离开你的电脑。</li>
+        <li><strong>「AI 校对」会把你选择的 Markdown 内容以真实网络请求发送到第三方服务 OrcaRouter</strong>，可能产生费用，费用由你自己的 OrcaRouter 账户承担。请确认内容适合发送到第三方后再使用。</li>
+        <li>本页面不会采集或保存任何 API Key；Key 只由服务器的环境变量 <code>ORCAROUTER_API_KEY</code> 提供。</li>
+        <li>本页面不使用任何本地持久化存储，也不加载第三方脚本 / 样式 / 字体 / 图片；运行结果仅在本页生成下载链接。</li>
+      </ul>
+    </section>
+
+    <div class="cards">
+      <section class="card" data-job-type="convert">
+        <h2>① PDF 转 Markdown</h2>
+        <p>上传一个 PDF 文件，转换结果为 Markdown，打包为 ZIP 供下载。</p>
+        <form class="job-form" novalidate>
+          <div class="field">
+            <label for="convert-file">选择 PDF 文件（.pdf）</label>
+            <input type="file" id="convert-file" name="file" accept=".pdf">
+          </div>
+          <div class="actions">
+            <button type="submit" class="submit-btn">提交任务</button>
+          </div>
+        </form>
+        <p class="status" role="status" aria-live="polite"></p>
+        <p class="error" role="alert"></p>
+        <div class="download-area" aria-live="polite"></div>
+      </section>
+
+      <section class="card" data-job-type="clean">
+        <h2>② Markdown 清理</h2>
+        <p>上传一个 Markdown 文件，清理重复段落、合并被折行的段落并保留列表，结果打包为 ZIP。</p>
+        <form class="job-form" novalidate>
+          <div class="field">
+            <label for="clean-file">选择 Markdown 文件（.md）</label>
+            <input type="file" id="clean-file" name="file" accept=".md">
+          </div>
+          <div class="actions">
+            <button type="submit" class="submit-btn">提交任务</button>
+          </div>
+        </form>
+        <p class="status" role="status" aria-live="polite"></p>
+        <p class="error" role="alert"></p>
+        <div class="download-area" aria-live="polite"></div>
+      </section>
+
+      <section class="card" data-job-type="pipeline">
+        <h2>③ 转换后清理流水线</h2>
+        <p>上传一个 PDF 文件，先转换为 Markdown，再执行清理，结果打包为 ZIP。</p>
+        <form class="job-form" novalidate>
+          <div class="field">
+            <label for="pipeline-file">选择 PDF 文件（.pdf）</label>
+            <input type="file" id="pipeline-file" name="file" accept=".pdf">
+          </div>
+          <div class="actions">
+            <button type="submit" class="submit-btn">提交任务</button>
+          </div>
+        </form>
+        <p class="status" role="status" aria-live="polite"></p>
+        <p class="error" role="alert"></p>
+        <div class="download-area" aria-live="polite"></div>
+      </section>
+
+      <section class="card card-ai" data-job-type="ai-clean">
+        <h2>④ AI 校对</h2>
+        <p>把单个 Markdown 文件发送到 OrcaRouter 做 OCR 纠错与 Markdown 排版修正。</p>
+        <form class="job-form" novalidate>
+          <div class="field">
+            <label for="ai-file">选择 Markdown 文件（.md，仅单个文件）</label>
+            <input type="file" id="ai-file" name="file" accept=".md">
+          </div>
+          <div class="field">
+            <span class="field-label">Provider</span>
+            <span class="provider-name">OrcaRouter</span>
+          </div>
+          <div class="field">
+            <label for="ai-model">模型名（必填）</label>
+            <input type="text" id="ai-model" name="model" required autocomplete="off"
+                   placeholder="例如 deepseek-chat">
+          </div>
+          <div class="field">
+            <span class="field-label">环境变量 Key 检测状态</span>
+            <p class="key-status" data-key-status role="status" aria-live="polite">
+              Key 由服务器环境变量 ORCAROUTER_API_KEY 提供，本页面不采集。
+            </p>
+          </div>
+          <div class="actions">
+            <button type="submit" class="submit-btn">提交任务</button>
+          </div>
+        </form>
+        <p class="status" role="status" aria-live="polite"></p>
+        <p class="error" role="alert"></p>
+        <div class="download-area" aria-live="polite"></div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <p>本页面与任务 API 同源运行；无外链脚本 / 样式 / 字体 / 图片，无遥测，无本地存储。</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
