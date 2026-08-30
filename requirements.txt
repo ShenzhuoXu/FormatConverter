@@ -1,2 +1,4 @@
 pymupdf4llm==0.3.4
 marker-pdf==1.10.2
+openai==3.6.0
+pytest==9.1.1

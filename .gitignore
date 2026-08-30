@@ -52,10 +52,12 @@ htmlcov/
 # -----------------------------------------------------------------------------
 
 # 操作系统生成的文件
-.DS_Store      # macOS
-Thumbs.db      # Windows
-ehthumbs.db    # Windows
+.DS_Store
+Thumbs.db
+ehthumbs.db
 
 # 编辑器/IDE 配置文件
-.idea/         # JetBrains IDEs (如 PyCharm)
-.vscode/       # Visual Studio Code.idea/
+# 注：git 2.53 中，规则行末尾的 "# 注释" 会导致该规则整体失效，
+# 因此注释统一放在单独的行里，避免影响规则匹配。
+.idea/
+.vscode/
