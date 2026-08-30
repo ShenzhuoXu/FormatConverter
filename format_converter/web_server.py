@@ -17,6 +17,7 @@ Only the Python standard library and this package's modules are imported.
 
 from __future__ import annotations
 
+import argparse
 import base64
 import io
 import ipaddress
@@ -28,15 +29,25 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
+import urllib.request
 import uuid
+import webbrowser
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .jobs import JobManager, JobStatus, UnknownJobTypeError
 
-__all__ = ["JobWebServer", "create_server", "DEFAULT_STATIC_DIR"]
+__all__ = [
+    "JobWebServer",
+    "create_server",
+    "DEFAULT_STATIC_DIR",
+    "run_server",
+    "main",
+    "ServerStartError",
+]
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -731,3 +742,210 @@ def create_server(
     server = JobWebServer(host=host, port=port, static_dir=static_dir, manager=manager)
     server.serve()
     return server
+
+
+# ---------------------------------------------------------------------------
+# Launcher layer (Step 5): find/start a server, reuse an existing one, block
+# until Ctrl+C, etc. All loopback-only; nothing here ever touches a public
+# address.
+# ---------------------------------------------------------------------------
+
+# Per-probe timeout for the /health check, in seconds.
+_HEALTH_TIMEOUT = 0.5
+# How long to keep polling /health after binding before giving up.
+_READY_TIMEOUT = 30.0
+
+
+class ServerStartError(RuntimeError):
+    """Raised when the launcher can neither start nor reuse a web service."""
+
+
+def _health_ok(port: int, timeout: float = _HEALTH_TIMEOUT) -> bool:
+    """Return True only when ``127.0.0.1:port/health`` serves our contract.
+
+    The exact contract is HTTP 200 with a JSON body of ``{"status": "ok"}``.
+    Any error (connection refused, timeout, non-200, malformed body) means
+    "not one of our instances" and yields ``False``.
+    """
+    url = f"http://127.0.0.1:{port}/health"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            if resp.status != 200:
+                return False
+            body = resp.read().decode("utf-8")
+            return json.loads(body) == {"status": "ok"}
+    except Exception:  # noqa: BLE001 - refused / timeout / non-JSON body
+        return False
+
+
+def _wait_healthy(port: int, timeout: float = _READY_TIMEOUT) -> None:
+    """Block until ``/health`` answers, or raise after ``timeout`` seconds."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if _health_ok(port):
+            return
+        if time.monotonic() > deadline:
+            raise ServerStartError(
+                f"服务在 {timeout:.0f} 秒内未就绪（http://127.0.0.1:{port}/health）。"
+            )
+        time.sleep(0.1)
+
+
+def _open_browser(port: int) -> None:
+    """Open the default browser at the local (loopback-only) service URL."""
+    webbrowser.open(f"http://127.0.0.1:{port}/")
+
+
+def run_server(
+    preferred_port: int = DEFAULT_PORT,
+    *,
+    open_browser: bool = True,
+    max_backup_ports: int = 5,
+) -> JobWebServer | None:
+    """Start the web service, reusing an already-running instance when possible.
+
+    Port strategy
+    -------------
+    - ``preferred_port == 0`` selects a random free port (the OS picks it).
+    - Otherwise try ``preferred_port`` first. If a *live* instance of this
+      service already answers ``/health`` there, reuse it (no new server).
+    - If the port is occupied by something else, try ``preferred_port + 1``
+      up to ``preferred_port + max_backup_ports`` in order.
+    - A bind that races with another process follows the same
+      health-check-reuse / next-port path.
+
+    Returns
+    -------
+    The running :class:`JobWebServer` when a **new** instance was started, or
+    ``None`` when an existing instance was reused (the caller must then *not*
+    call :meth:`JobWebServer.shutdown` -- the existing server keeps running).
+    """
+    if isinstance(preferred_port, bool) or not isinstance(preferred_port, int):
+        raise ValueError("preferred_port must be an int")
+    if max_backup_ports < 0:
+        raise ValueError("max_backup_ports must be non-negative")
+
+    if preferred_port == 0:
+        candidates: list[int] = [0]
+    else:
+        candidates = list(range(preferred_port, preferred_port + max_backup_ports + 1))
+
+    last_error: OSError | None = None
+    for port in candidates:
+        if port != 0 and _health_ok(port):
+            _announce_reuse(port, open_browser)
+            return None
+
+        server = JobWebServer(host=DEFAULT_HOST, port=port, static_dir=DEFAULT_STATIC_DIR)
+        try:
+            bound = server.serve()
+        except OSError as exc:
+            last_error = exc
+            server.shutdown()
+            # Race: an instance may have started between the probe and the
+            # bind; treat it exactly like the pre-bind reuse case.
+            if port != 0 and _health_ok(port):
+                _announce_reuse(port, open_browser)
+                return None
+            continue
+
+        try:
+            if port != 0 and bound != preferred_port:
+                _print(f"端口 {preferred_port} 被占用，改用端口 {bound}")
+            _wait_healthy(bound)
+        except Exception:
+            server.shutdown()
+            raise
+        _print(f"服务已就绪：http://127.0.0.1:{bound}/")
+        _print("按 Ctrl+C 停止")
+        if open_browser:
+            _open_browser(bound)
+        return server
+
+    # Every candidate was occupied by something that is not our service.
+    detail = f"端口 {preferred_port}"
+    if preferred_port != 0 and max_backup_ports > 0:
+        detail += (
+            f" 及备用端口 {preferred_port + 1}..{preferred_port + max_backup_ports}"
+        )
+    detail += " 均被占用"
+    if last_error is not None:
+        detail += f"（最后一次绑定错误：{last_error}）"
+    detail += "。请关闭占用这些端口的程序后重试，或改用其它端口。"
+    raise ServerStartError(detail)
+
+
+def _announce_reuse(port: int, open_browser: bool) -> None:
+    _print(f"服务已在运行：http://127.0.0.1:{port}/")
+    _print("无需重复启动，直接使用现有实例。")
+    if open_browser:
+        _open_browser(port)
+
+
+def _print(*parts: object) -> None:
+    print(" ".join(str(part) for part in parts))
+
+
+def _wait_until_interrupted() -> None:
+    """Block until Ctrl+C; return once KeyboardInterrupt is delivered."""
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        return
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: parse args, run the server, block until Ctrl+C.
+
+    Returns 0 on a clean shutdown (including the reuse case) and a non-zero
+    code when the server could not be started.
+    """
+    parser = argparse.ArgumentParser(
+        prog="format_converter.web_server",
+        description="启动 FormatConverter 本地图形界面服务（仅绑定 127.0.0.1）。",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"首选端口（默认 {DEFAULT_PORT}；0 = 随机空闲端口）",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="启动后不自动打开默认浏览器",
+    )
+    parser.add_argument(
+        "--max-backup-ports",
+        type=int,
+        default=5,
+        dest="max_backup_ports",
+        help="首选端口被占用时依次尝试的备用端口数量（默认 5）",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        server = run_server(
+            preferred_port=args.port,
+            open_browser=not args.no_browser,
+            max_backup_ports=args.max_backup_ports,
+        )
+    except Exception as exc:  # noqa: BLE001 - report any launcher error clearly
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
+
+    if server is None:
+        return 0
+
+    try:
+        _wait_until_interrupted()
+    except KeyboardInterrupt:
+        print("\n收到 Ctrl+C，正在停止服务...")
+    finally:
+        server.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

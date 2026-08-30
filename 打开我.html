@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>FormatConverter 尚未启动</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    line-height: 1.7;
+    max-width: 720px;
+    margin: 40px auto;
+    padding: 0 20px;
+    color: #222;
+  }
+  h1 { font-size: 1.5em; }
+  .notice {
+    border: 1px solid #d0a23c;
+    background: #fff8e6;
+    padding: 12px 16px;
+    border-radius: 6px;
+  }
+  code, pre {
+    font-family: Consolas, "Courier New", monospace;
+    background: #f3f3f3;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  pre {
+    padding: 10px 14px;
+    overflow-x: auto;
+  }
+  ol, ul { padding-left: 22px; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #ddd; }
+    .notice { background: #3a2f14; border-color: #8a6d2b; }
+    code, pre { background: #2a2a2a; }
+  }
+</style>
+</head>
+<body>
+  <h1>FormatConverter 尚未启动</h1>
+
+  <p class="notice">本页面只是一个说明页，<strong>不是</strong>应用入口，也不代表服务已经运行。
+  它不会调用任何接口，也不需要你填写任何内容。请先启动本地服务，再访问
+  <code>http://127.0.0.1:8765/</code> 使用图形界面。</p>
+
+  <h2>如何启动</h2>
+  <ol>
+    <li>
+      双击仓库根目录下的 <strong><code>启动图形界面.bat</code></strong>。
+      <br>脚本会自动选择 Python、检查依赖、启动服务，并打开默认浏览器。
+      <br>启动后请保留弹出的黑色窗口（它就是服务窗口），按 <code>Ctrl+C</code> 可停止服务。
+    </li>
+    <li>
+      或在命令行（终端）中手动执行：
+      <pre>python -m format_converter.web_server</pre>
+    </li>
+  </ol>
+
+  <h2>前置条件</h2>
+  <ul>
+    <li>Python 3.11 或更高版本。</li>
+    <li>
+      在仓库根目录安装依赖（首次使用）：
+      <pre>
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+      </pre>
+    </li>
+  </ul>
+
+  <h2>说明</h2>
+  <ul>
+    <li>服务只监听本机 <code>127.0.0.1</code>，不会暴露到公网。</li>
+    <li>如果浏览器已打开但页面仍显示“尚未启动”，请稍等片刻或刷新页面。</li>
+    <li>若端口 8765 被其它程序占用，脚本会自动改用相邻的空闲端口，并给出提示。</li>
+  </ul>
+</body>
+</html>
