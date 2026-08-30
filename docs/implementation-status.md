@@ -11,6 +11,7 @@
 | Step 1 | 工程化与持续集成（pytest 配置 / 依赖划分 / GitHub Actions） | ✅ 通过 | `e72eaa4` | 103 tests 全绿，独立审查通过 |
 | Step 2 | 任务服务层（jobs.py：CLI 与未来 Web UI 复用） | ✅ 通过 | `735cc7b` | 118 tests 全绿，独立审查通过 |
 | Step 3 | 本机 Web 服务（web_server.py：仅回环访问的任务 API） | ✅ 通过 | `fba444a` | 145 tests 全绿，独立审查通过 |
+| Step 4 | 中文单页 Web UI（四张功能卡片） | ✅ 通过 | `4dd840e` | 155 tests 全绿，独立审查通过 |
 | Step 2 | （待工作单） | ⬜ 未开始 | — | — |
 | Step 3 | （待工作单） | ⬜ 未开始 | — | — |
 | Step 4 | （待工作单） | ⬜ 未开始 | — | — |
@@ -167,3 +168,33 @@
 ### 注意事项
 - `static_dir` 为可选能力（供未来 UI 使用），本步未提供具体静态内容；`GET /` 内置信息页。
 - 下载 ZIP 文件名以 job_id 命名；上传内容（客户端自身数据）会原样出现在 ZIP 中（属预期）。
+
+---
+
+## Step 4 — 中文单页 Web UI
+
+### 状态：✅ 验收通过（2026-08-31）
+
+### 范围
+- 新增 `format_converter/web/static/` 下三件套（index.html / styles.css / app.js），四张功能卡片；`web_server.py` 最小改动以默认服务打包 UI；不改变 API 契约与 CLI 行为。
+
+### 提交
+- `4dd840e` `feat: add local web interface for file conversion`（5 文件，+865/−3）
+
+### 改动内容
+- `format_converter/web/static/index.html`：中文单页，四张卡片（①PDF转Markdown ②Markdown清理 ③转换后清理流水线 ④AI校对），顶部网络/隐私/费用提示；所有控件有 `<label for>`、原生 `<button>`、`role="status"/"alert"` + `aria-live`；仅本地 `styles.css`/`app.js`，无 localStorage/CDN/外链/Key 输入。
+- `format_converter/web/static/app.js`：FileReader → base64 → `POST /api/jobs`（同源相对路径）→ ~1s 递归轮询（无重叠、`currentJobId` 防串扰）→ succeeded 显示「下载 ZIP」链接 / failed 显示脱敏 message；按钮提交后禁用、终态恢复；错误可见。**AI 卡片**：仅单 .md、Provider 固定 OrcaRouter、模型名必填（关联 label）、Key 检测状态由任务结果推断（初始说明性文案 → 缺 Key 失败→警示 → 成功→✓），未改后端。
+- `format_converter/web/static/styles.css`：本地样式、响应式网格、高对比错误色（对比度均 ≥4.5:1 AA）。
+- `format_converter/web_server.py`（最小改动）：新增 `DEFAULT_STATIC_DIR`（打包 UI 目录）；`create_server()` 默认 static_dir 指向它（可显式传 None 禁用）；`_send_index` 有 index.html 优先服务否则回退内置页。路由/状态码/响应结构零改动；`JobWebServer(static_dir=None)` 直接构造行为不变。
+- `tests/test_web_ui.py`（新增，10 测试）：静态加载、页面源码合规（无 localStorage/外链/Key 输入）、`node --check`、clean 全流程（提交→轮询→下载→解压去重校验）。
+
+### 测试证据
+- 最终门禁：`pytest` → `155 passed in 17.42s`（145 + 10）；`compileall -q .` → 0；`git diff --check` → 通过；`node --check app.js` → 通过。
+- 独立核验：`create_server(port=0)` 起服务后 `/`、`/static/app.js`、`/static/styles.css` 均 200 且 Content-Type 正确；四卡片流程经 http.client 实测走通；页面合规 grep 0 命中；无障碍对比度核算均 ≥4.5:1。
+
+### 审查结论
+- 独立审查 agent（对抗式）：**无 P0/P1/P2**，结论「验收通过」。四卡片数据属性、轮询守卫、AI 卡片 Key 推断、页面合规扫描、无障碍、web_server 最小改动、测试质量均逐项独立核对通过。
+- 仅 2 条 P3 设计备注（非阻塞，已接受）：app.js 的 "unknown status" 分支为防御性死代码（无害）；AI 卡片 key-status 在上次成功、本次非 Key 类失败时保持 ✓（检测对象是 Key 本身，行为合理）。
+
+### 注意事项
+- 验收项「用浏览器手工验证四张卡片的提交、状态与下载流程」属**用户侧手工验证**：自动化已用 http.client 复现同 API 流程并全部通过，但真实浏览器点击验证待用户执行（可运行 `main.py` 或 Step 5 的启动脚本后打开 `http://127.0.0.1:8765/`）。
