@@ -232,3 +232,9 @@
 ### 注意事项
 - 「Windows 双击 BAT 可启动服务并打开浏览器」属**用户侧手工验证**：自动化已覆盖 BAT 依赖缺失分支冒烟与启动层全部逻辑，真实双击体验待用户确认（双击 `启动图形界面.bat` 即可）。
 - BAT 提示为英文（ASCII 稳健性优先）；页面与运行消息仍为中文。
+
+### 修复记录（用户侧实测发现，2026-08-31，提交 `51c7419`）
+用户报告双击 BAT 未启动浏览器，复现发现两个独立 bug，均已修复并端到端验证：
+- **BAT 解析崩溃**：可选依赖 `if errorlevel 1 ( ... )` 括号块内的 `echo` 文本含裸括号（`(ai-clean)`/`(convert/pipeline)`），`cmd.exe` 把 `)` 当作块结束符，导致 `will was unexpected at this time.` 解析错误、服务未启动。修复：去掉两行 echo 中的括号；复现确认 BAT 走到服务启动并打开浏览器。
+- **UI 资源 404**：`index.html` 的 `styles.css`/`app.js` 引用是相对路径，浏览器解析为 `/styles.css`、`/app.js`，而服务端只在 `/static/` 前缀下服务静态文件 → 404，页面无样式且无 JS 功能。修复：改用同源绝对路径 `/static/styles.css`、`/static/app.js`；并把 `test_web_ui.py` 合规断言从「禁止一切 `/` 开头路径」放宽为「仅允许同源 `/static/`、仍禁外链/CDN」，新增回归测试「首页引用的每个 /static/ 资源必须 200」。
+- 修复后全量 `170 passed`（+1 回归测试）；端到端复现：BAT 启动 → `/`、`/static/app.js`、`/static/styles.css`、`/health` 全部 200。
