@@ -12,7 +12,8 @@
 | Step 2 | 任务服务层（jobs.py：CLI 与未来 Web UI 复用） | ✅ 通过 | `735cc7b` | 118 tests 全绿，独立审查通过 |
 | Step 3 | 本机 Web 服务（web_server.py：仅回环访问的任务 API） | ✅ 通过 | `fba444a` | 145 tests 全绿，独立审查通过 |
 | Step 4 | 中文单页 Web UI（四张功能卡片） | ✅ 通过 | `4dd840e` | 155 tests 全绿，独立审查通过 |
-| Step 5 | Windows 一键启动（启动图形界面.bat + 启动层） | ✅ 通过 | `f0f6fdf` | 169 tests 全绿，独立审查通过 |
+| Step 5 | Windows 一键启动（启动图形界面.bat + 启动层） | ✅ 通过 | `f0f6fdf`（+`51c7419` 修复） | 170 tests 全绿，独立审查通过 |
+| Step 6 | 补测试与修复（端到端回归 + 安全覆盖） | ✅ 通过 | `9f10a48` | 198 tests 全绿（含无 Key 环境），独立审查通过 |
 | Step 2 | （待工作单） | ⬜ 未开始 | — | — |
 | Step 3 | （待工作单） | ⬜ 未开始 | — | — |
 | Step 4 | （待工作单） | ⬜ 未开始 | — | — |
@@ -238,3 +239,38 @@
 - **BAT 解析崩溃**：可选依赖 `if errorlevel 1 ( ... )` 括号块内的 `echo` 文本含裸括号（`(ai-clean)`/`(convert/pipeline)`），`cmd.exe` 把 `)` 当作块结束符，导致 `will was unexpected at this time.` 解析错误、服务未启动。修复：去掉两行 echo 中的括号；复现确认 BAT 走到服务启动并打开浏览器。
 - **UI 资源 404**：`index.html` 的 `styles.css`/`app.js` 引用是相对路径，浏览器解析为 `/styles.css`、`/app.js`，而服务端只在 `/static/` 前缀下服务静态文件 → 404，页面无样式且无 JS 功能。修复：改用同源绝对路径 `/static/styles.css`、`/static/app.js`；并把 `test_web_ui.py` 合规断言从「禁止一切 `/` 开头路径」放宽为「仅允许同源 `/static/`、仍禁外链/CDN」，新增回归测试「首页引用的每个 /static/ 资源必须 200」。
 - 修复后全量 `170 passed`（+1 回归测试）；端到端复现：BAT 启动 → `/`、`/static/app.js`、`/static/styles.css`、`/health` 全部 200。
+
+---
+
+## Step 6 — 补测试与修复
+
+### 状态：✅ 验收通过（2026-08-31）
+
+### 范围
+- **只补测试与修复发现的问题，不添加新功能**。核心源码零改动；新增 28 个测试（170→198）+ 两份文档。
+
+### 提交
+- `9f10a48` `test: add end-to-end regression and security coverage`（6 文件，+787/−1）
+
+### 改动内容
+- `tests/test_cli_commands.py`（新增，16 测试）：`convert`/`clean`/`pipeline`/`marker` 的 `main()` 端到端 wiring（monkeypatch 假函数，断言返回码与输出）；空目录/无 PDF 优雅路径（rc=0 打印 0 个文件，走真实 glob 不触发惰性导入）；缺失文件/目录的错误传播路径（`pytest.raises` 文档化既有契约，未改 CLI 行为）。
+- `tests/test_security_invariants.py`（新增，5 测试）：全仓 `git ls-files` 扫描无真实 Key（`sk-<12+ alnum>` 负向前瞻豁免 `sk-test*`；`ORCAROUTER_API_KEY = "<非占位符>"`）；`.idea/`/`.pytest-tmp`/`__pycache__`/`.pytest_cache` 不在跟踪；核心模块顶层 import 无网络库（AST 扫描，惰性导入不误报）；全新解释器导入 `web_server`/`jobs` 后 `sys.modules` 无网络客户端（子进程验证）。
+- `tests/test_web_server.py`（+6）：413 超大请求体；convert/pipeline/ai-clean 三条全流程 e2e（上传→状态→下载 ZIP）；succeeded 但无输出文件 → 404；布尔字符串形近值（`"false"`）不翻转默认行为。
+- `tests/test_cli.py`（+1）：纯空白输入 → 原样写出、LLM 客户端零调用。
+- `docs/verification-checklist.md`（新增）：自动化验收矩阵（CLI/Web/AI/安全逐项 → 测试用例 → 结果）+ 手工验收项（待用户执行）+ 安全清单证据与结论。
+- `README.md`（+25）：新增「Windows 一键启动与手工验证」小节（双击步骤、预期现象、停止方式、端口占用/复用行为、依赖缺失提示）。
+
+### 测试证据
+- 最终门禁：`pytest` → **198 passed**（正常）；**`unset ORCAROUTER_API_KEY` 下重跑 → 198 passed**（证明无需真实 Key、无真实网络）；`compileall -q .` → 0；`git diff --check` → 通过。
+- 独立核验：`git diff --name-only HEAD | grep -c '^format_converter/'` = 0（**核心源码零改动**）；`git status --short` 恰为 6 个预期文件；无 `.pytest-tmp` 残留。
+
+### 审查结论
+- 独立审查 agent（对抗式，独立查看完整 diff 与测试结果）：第一轮**无 P0/P1**，P2×4（均轻微、非缺陷、建议性）：
+  - 安全扫描 `_SK_REAL_KEY_RE` 靠连字符切分间接豁免 `sk-test*` → 改为负向前瞻 `(?!sk-test)` 显式豁免（真实 key 仍检出）。
+  - `_KEY_ASSIGN_RE` 只匹配 `VAR = "..."` 形状 → 保持现状 + 注释声明边界（`sk-` 扫描是兜底网）。
+  - `test_marker_wiring` 用 `.resolve()` 断言脆弱 → 改为捕获 fake 实参断言。
+  - 布尔形近值测试为黑盒断言 → 加注释说明语义与局限。
+- 修复后复审：**验收通过，无残留 P0/P1/P2**；核心源码零改动确认；两次 pytest 198 passed。
+
+### 注意事项
+- 手工验收项（BAT 双击、浏览器四卡片流程、停止方式、端口占用、依赖缺失提示）已写入 `docs/verification-checklist.md` 第二节与 README，待用户执行。
