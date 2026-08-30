@@ -9,6 +9,7 @@
 | ---- | ---- | ---- | ---- | ---- |
 | Step 0 | 固化现有 CLI 与 AI 校对功能（ai-clean / OrcaRouter） | ✅ 通过 | `4834b2d`（功能）+ `973ff35`（硬化修复） | 103 tests 全绿，独立审查通过 |
 | Step 1 | 工程化与持续集成（pytest 配置 / 依赖划分 / GitHub Actions） | ✅ 通过 | `e72eaa4` | 103 tests 全绿，独立审查通过 |
+| Step 2 | 任务服务层（jobs.py：CLI 与未来 Web UI 复用） | ✅ 通过 | `735cc7b` | 118 tests 全绿，独立审查通过 |
 | Step 2 | （待工作单） | ⬜ 未开始 | — | — |
 | Step 3 | （待工作单） | ⬜ 未开始 | — | — |
 | Step 4 | （待工作单） | ⬜ 未开始 | — | — |
@@ -89,3 +90,40 @@
 
 ### 注意事项
 - CI 无法在本机真实运行（不得 push / 不得创建 PR）；YAML 有效性已静态校验，真实 runner 首跑应确认 marker-pdf 在 Windows + Python 3.13 的安装可行性。
+
+---
+
+## Step 2 — 任务服务层（jobs.py）
+
+### 状态：✅ 验收通过（2026-08-31）
+
+### 范围
+- 新增 `format_converter/jobs.py`：把 convert、clean、pipeline、ai-clean 包装为统一任务模型，供 CLI 与未来 Web UI 复用；不实现 HTTP/HTML/页面。未改动任何现有文件与 CLI 表现。
+
+### 提交
+- `735cc7b` `feat: add reusable background job service`（2 文件，+623）
+
+### 改动内容
+- `format_converter/jobs.py`（新增，342 行）：
+  - `JobStatus(str, Enum)`：`queued` / `running` / `succeeded` / `failed`。
+  - `JobResult`（frozen dataclass）：`job_id` / `status` / `message` / `output_paths: tuple[Path, ...]`。
+  - `JobManager`：`submit(job_type, params) -> job_id`、`get(job_id) -> JobResult | None`、`wait(job_id, timeout) -> JobResult | None`。后台 **daemon** 线程执行；`threading.Condition` 守卫；异常一律转 `failed`（线程绝不崩溃）；handler 实例级注册表便于未来扩展。
+  - handler：`convert` / `clean`（单文件+目录）、`pipeline`、`ai-clean`（可选注入 `client`，未注入时由 `cli.ai_clean` 内部只读 `ORCAROUTER_API_KEY`）；只调用既有 Python 函数，无 shell/子进程/网络。
+  - `_sanitize_message`：失败/成功消息存储前，若 `ORCAROUTER_API_KEY` 已设置，把文本中出现的 Key 值替换为 `***`（防御性兜底；主保证是 handler 不写入 Key）。
+  - 仅 import 标准库 + 本包模块，无 HTTP/HTML/浏览器依赖。
+- `tests/test_jobs.py`（新增，281 行，15 测试）：成功（convert/clean/pipeline）、失败（FileNotFoundError → failed）、未知 job_type（同步抛错）、未知 job_id（get/wait 返回 None）、AI Key 缺失（failed、message 只含变量名不含值）、AI 注入 fake client 成功、脱敏（异常文本含 Key → `***`）、状态流转、wait 超时/负超时、非 dict params。
+
+### 测试证据
+- 最终门禁：`pytest` → `118 passed in 0.86s`（103 + 15）；`compileall -q .` → 0；`git diff --check` → 通过。
+- 独立核验：`import format_converter.jobs` 后扫描 `sys.modules` 无任何 network 模块（openai/pymupdf4llm/marker 均惰性导入）；缺 Key 时 AI 任务在任何网络调用前经 `MissingApiKeyError` 失败；daemon=True 实测确认。
+
+### 审查结论
+- 独立审查 agent（对抗式）第一轮：**P0 无、P1 无、P2 4 项**，结论「验收通过」。
+  - P2-1 `except BaseException` 兜底：审查认可行为（CPython 中 KeyboardInterrupt 只投递主线程；SystemExit → failed 可接受）→ 加设计意图注释，行为不变。
+  - P2-2 handler `bool(params.get(...))` 强转：未来 Web UI 若传字符串形近值（"false"/"0"）会静默翻转 → JobManager docstring 注明布尔参数须为真正 Python bool。
+  - P2-3 `_sanitize_message` 仅精确匹配 Key 值：属防御性兜底，主保证在 handler → docstring 注明边界。
+  - P2-4 异常链被压平：刻意设计（链可能含敏感信息）→ 加注释。
+- 修复后复审：**验收通过，无 P0/P1/P2 新增**。复审用 AST 剥离 docstring 后对比，确认可执行代码**逐字节等价**（纯注释/docstring 改动）。
+
+### 注意事项
+- `jobs.py` 依赖 `cli.ai_clean`（位于 cli.py）；未来若将 AI 编排迁出 CLI 可再解耦（非本次范围）。
