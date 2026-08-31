@@ -301,3 +301,9 @@
 
 ### 注意事项
 - **未 push、未创建 GitHub Release**（按工作单红线）。用户后续可自行决定何时 push / 打 tag / 建 Release；发布前按 `docs/release-checklist.md` 逐项核对（含手工验收项）。
+
+### 发布审核修复记录（2026-08-31，提交 `2d2cb82`）
+发布审核发现并已修复：
+- **P1**：本文件 Step 7 章节描述 docstring 修复时含一个「环境变量名 + 等号 + 带引号非占位值」形状的字面示例，安全扫描测试会扫所有已跟踪文件并将其判为非占位 Key → HEAD 全量测试实际失败（复现：`test_no_real_key_patterns_in_tracked_files` 失败）。已改为不含该形状的纯文字说明；扫描器规则零改动。
+- **P2**：总览表残留一行重复的「Step 7（待工作单）」占位行，已删除。
+- 修复后：全量 **198 passed**（含无 `ORCAROUTER_API_KEY` 环境重跑）、`compileall` 0、`git diff --check` 通过、工作树干净。
