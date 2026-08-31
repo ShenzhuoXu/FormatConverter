@@ -78,7 +78,7 @@
 - YAML 校验：系统 python + PyYAML 6.0.3 `yaml.safe_load` → `YAML OK`。
 - `git check-ignore`：`.pytest-tmp/`、`.pytest_cache/`、`web_uploads/`、`.idea/` 等全部命中。
 - 新增/修改文件 grep `C:\|C:/|/Users/` 0 命中（无用户绝对路径）。
-- 依赖闭环核验：`tests/test_llm_client.py` 顶层 `import httpx2`，而 `httpx2` 是 `openai==3.6.0` 的传递依赖（`httpx2<3,>=2.7.0`），CI 安装 requirements.txt 后自动可用，无缺口。
+- 依赖闭环核验：`tests/test_llm_client.py` 顶层 `import httpx`，而 `httpx` 是 `openai`（1.x，与 marker-pdf 兼容）的传递依赖，CI 安装 requirements.txt 后自动可用，无缺口。（注：早期版本用 `openai==3.6.0` 时此处为 `httpx2`；后因 marker-pdf 与 openai 3.x 版本冲突，已按发布审核统一降级到 openai 1.x。）
 
 ### 审查结论
 - 独立审查 agent（对抗式）第一轮：**P0 无、P1 1 项、P2 多项**。
@@ -307,3 +307,10 @@
 - **P1**：本文件 Step 7 章节描述 docstring 修复时含一个「环境变量名 + 等号 + 带引号非占位值」形状的字面示例，安全扫描测试会扫所有已跟踪文件并将其判为非占位 Key → HEAD 全量测试实际失败（复现：`test_no_real_key_patterns_in_tracked_files` 失败）。已改为不含该形状的纯文字说明；扫描器规则零改动。
 - **P2**：总览表残留一行重复的「Step 7（待工作单）」占位行，已删除。
 - 修复后：全量 **198 passed**（含无 `ORCAROUTER_API_KEY` 环境重跑）、`compileall` 0、`git diff --check` 通过、工作树干净。
+
+### 依赖版本冲突修复记录（2026-08-31，提交 `a4b9c01`）
+用户按 README 执行 `pip install -r requirements.txt` 时发现依赖无法解析：
+- **根因**：`requirements.txt` 同时固定 `openai==3.6.0`（3.x）与 `marker-pdf==1.10.2`，而 marker-pdf 要求 `openai>=1.65.2,<2.0.0` → pip `ResolutionImpossible`。此前本地 venv 只装过 openai 3.6.0、从未装 marker-pdf（转换惰性导入），故 198 个测试从未暴露该冲突。
+- **修复**：统一降级 `openai==3.6.0` → `openai==1.106.0`（满足 marker-pdf `<2.0.0`）；`tests/test_llm_client.py` 的 `httpx2` → `httpx`（openai 1.x 的 HTTP 客户端）；`llm_client.py` 无需改动（`OpenAI(base_url=...)`/`chat.completions`/`AuthenticationError`/`PermissionDeniedError`/`APIStatusError` 等错误类在 1.106.0 全部存在，已实测）。
+- **验证**：`pip install -r requirements.txt --dry-run` → 退出码 0（解析成功，含 marker-pdf/torch 整树）；venv 降到 openai 1.106.0 后全量 **198 passed**（含无 Key 环境），`compileall` 0、`git diff --check` 通过。
+- CHANGELOG 与 release-checklist 已同步（新增依赖解析验证项）。

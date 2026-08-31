@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import httpx2
+import httpx
 import openai
 import pytest
 
@@ -23,9 +23,9 @@ from format_converter.providers import get_provider
 SECRET = "sk-leak-check-value"
 
 
-def _http_response(status: int) -> httpx2.Response:
-    request = httpx2.Request("POST", "https://api.orcarouter.ai/v1/chat/completions")
-    return httpx2.Response(status, request=request)
+def _http_response(status: int) -> httpx.Response:
+    request = httpx.Request("POST", "https://api.orcarouter.ai/v1/chat/completions")
+    return httpx.Response(status, request=request)
 
 
 def _status_error(cls: type, status: int) -> openai.APIStatusError:
@@ -111,7 +111,7 @@ class TestOpenAICompatClient:
         assert SECRET not in str(excinfo.value)
 
     def test_connection_error_mapped_and_key_not_leaked(self) -> None:
-        request = httpx2.Request("POST", "https://api.orcarouter.ai/v1/chat/completions")
+        request = httpx.Request("POST", "https://api.orcarouter.ai/v1/chat/completions")
         fake = _FakeCompletions(raise_exc=openai.APIConnectionError(request=request))
         client = make_client(fake)
         with pytest.raises(ConnectionFailedError) as excinfo:
@@ -119,7 +119,7 @@ class TestOpenAICompatClient:
         assert SECRET not in str(excinfo.value)
 
     def test_timeout_mapped_to_connection_error(self) -> None:
-        request = httpx2.Request("POST", "https://api.orcarouter.ai/v1/chat/completions")
+        request = httpx.Request("POST", "https://api.orcarouter.ai/v1/chat/completions")
         fake = _FakeCompletions(raise_exc=openai.APITimeoutError(request=request))
         client = make_client(fake)
         with pytest.raises(ConnectionFailedError):

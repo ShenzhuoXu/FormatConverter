@@ -10,6 +10,9 @@
   - 测后清理：`rm -rf .pytest-tmp`。
 - [ ] 字节码编译：`./.venv/Scripts/python.exe -m compileall -q .` → 退出码 0。
 - [ ] diff 空白检查：`git diff --check` → 成功（Windows autocrlf 的 LF→CRLF 提示性 warning 不算错误）。
+- [ ] 依赖解析可复现（全新安装不冲突）：
+  `./.venv/Scripts/python.exe -m pip install -r requirements.txt --dry-run` → 成功（退出码 0，无 `ResolutionImpossible`）。
+  - 已知约束：`openai` 与 `marker-pdf` 统一在 `openai==1.106.0`（marker-pdf 要求 `openai<2.0.0`），勿再固定 openai 3.x。
 
 ## 2. 无真实 Key
 

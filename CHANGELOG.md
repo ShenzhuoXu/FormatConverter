@@ -15,6 +15,10 @@
 - 任务服务层 `format_converter/jobs.py`：统一的后台任务模型，供 CLI 与 Web UI 复用。
 - GitHub Actions 测试工作流 `.github/workflows/tests.yml`：在 `windows-latest` 上对 Python 3.12 / 3.13 运行全量测试与编译检查。
 
+### 修复
+
+- 修复 `requirements.txt` 中 `openai==3.6.0` 与 `marker-pdf==1.10.2` 的依赖版本冲突（marker-pdf 要求 `openai>=1.65.2,<2.0.0`）：统一降级到 `openai==1.106.0`，AI 校对客户端保持兼容（错误映射、OpenAI 兼容端点不变），相关测试适配（`httpx2` → `httpx`，openai 1.x 的 HTTP 客户端）。`pip install -r requirements.txt` 现在可正常解析安装。
+
 ## [0.1.0] - 2026-08-30
 
 - 初始版本：`convert` / `marker` / `clean` / `pipeline` CLI 与 Markdown 清理能力。
