@@ -4,10 +4,11 @@ These tests are not about any single feature; they guard the project as a
 whole against regressions that would break the stated security posture:
 
 - **No real API key on disk.** Every git-tracked file is scanned for the
-  two realistic key shapes the project could ever commit (an
-  ``ORCAROUTER_API_KEY = "<secret>"`` assignment with a non-placeholder
-  value, and an OpenAI-style ``sk-<12+ alnum>`` token). Test doubles that
-  use ``sk-test...`` short/dashed values are intentionally not flagged.
+  two realistic key shapes the project could ever commit: an
+  ``ORCAROUTER_API_KEY`` environment-variable assignment whose value is
+  not a recognized placeholder, and an OpenAI-style ``sk-<12+ alnum>``
+  token. Test doubles that use ``sk-test...`` short/dashed values are
+  intentionally not flagged.
 - **No IDE/cache artifacts tracked.** ``.idea/``, ``__pycache__`` and the
   pytest temp/cache dirs must never be committed.
 - **No third-party / raw-network imports at module top level.** The core

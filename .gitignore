@@ -37,6 +37,8 @@ venv/
 env/
 ENV/
 .env/
+# 环境变量文件（.env 是文件，区别于上面的 .env/ 目录）
+.env
 
 # 打包和分发目录
 dist/
