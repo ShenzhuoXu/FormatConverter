@@ -15,7 +15,6 @@
 | Step 5 | Windows 一键启动（启动图形界面.bat + 启动层） | ✅ 通过 | `f0f6fdf`（+`51c7419` 修复） | 170 tests 全绿，独立审查通过 |
 | Step 6 | 补测试与修复（端到端回归 + 安全覆盖） | ✅ 通过 | `9f10a48` | 198 tests 全绿（含无 Key 环境），独立审查通过 |
 | Step 7 | 发布准备（README/CHANGELOG/版本号/发布清单） | ✅ 通过 | `e7ccb15` | 198 tests 全绿，最终全分支审查通过 |
-| Step 7 | （待工作单） | ⬜ 未开始 | — | — |
 
 ---
 
@@ -289,7 +288,7 @@
 - `format_converter/__init__.py`：`__version__` 0.1.0 → 0.2.0。
 - `docs/release-checklist.md`（新增）：测试全量 / 无真实 Key / 无临时文件 / 无 .idea / 无 .env / 无绝对用户路径 / 不 push 不建 Release，每项含验证命令。
 - `.gitignore`：补 `.env`（文件）忽略行（原仅 `.env/` 目录）。
-- `tests/test_security_invariants.py`（docstring 仅措辞）：修复潜伏自引用 bug——模块 docstring 原含 `ORCAROUTER_API_KEY = "<secret>"` 字面示例，而安全扫描会扫所有 git 跟踪文件；Step 6 提交（9f10a48）前该文件未跟踪故未被扫，提交后被跟踪即误报自身。改为纯文字描述，扫描逻辑零改动。
+- `tests/test_security_invariants.py`（docstring 仅措辞）：修复潜伏自引用 bug——模块 docstring 原含一个「环境变量名 + 等号 + 带引号占位值」形状的字面示例，而安全扫描会扫所有 git 跟踪文件；该形状会被扫描器判为非占位 Key 而误报自身。Step 6 提交（9f10a48）前该文件未跟踪故未被扫，提交后被跟踪即暴露。已改为纯文字描述（不再出现该形状），扫描逻辑零改动。
 
 ### 测试证据
 - 最终门禁：`pytest` → **198 passed**；`compileall -q .` → 0；`git diff --check` → 通过；`python -c "from format_converter import __version__"` → 0.2.0；`git check-ignore .env` → 命中。
