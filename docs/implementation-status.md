@@ -14,11 +14,7 @@
 | Step 4 | 中文单页 Web UI（四张功能卡片） | ✅ 通过 | `4dd840e` | 155 tests 全绿，独立审查通过 |
 | Step 5 | Windows 一键启动（启动图形界面.bat + 启动层） | ✅ 通过 | `f0f6fdf`（+`51c7419` 修复） | 170 tests 全绿，独立审查通过 |
 | Step 6 | 补测试与修复（端到端回归 + 安全覆盖） | ✅ 通过 | `9f10a48` | 198 tests 全绿（含无 Key 环境），独立审查通过 |
-| Step 2 | （待工作单） | ⬜ 未开始 | — | — |
-| Step 3 | （待工作单） | ⬜ 未开始 | — | — |
-| Step 4 | （待工作单） | ⬜ 未开始 | — | — |
-| Step 5 | （待工作单） | ⬜ 未开始 | — | — |
-| Step 6 | （待工作单） | ⬜ 未开始 | — | — |
+| Step 7 | 发布准备（README/CHANGELOG/版本号/发布清单） | ✅ 通过 | `e7ccb15` | 198 tests 全绿，最终全分支审查通过 |
 | Step 7 | （待工作单） | ⬜ 未开始 | — | — |
 
 ---
@@ -274,3 +270,35 @@
 
 ### 注意事项
 - 手工验收项（BAT 双击、浏览器四卡片流程、停止方式、端口占用、依赖缺失提示）已写入 `docs/verification-checklist.md` 第二节与 README，待用户执行。
+
+---
+
+## Step 7 — 发布准备
+
+### 状态：✅ 发布就绪（2026-08-31；未 push、未创建 GitHub Release）
+
+### 范围
+- README 增强（图形界面三步启动 / CLI 用法 / AI 隐私·费用·Key 配置 / 常见故障排查 / Windows 支持范围）；CHANGELOG.md；版本号 0.2.0；发布检查清单；`.env` 忽略。除版本号与一处测试 docstring 措辞外无代码改动。
+
+### 提交
+- `e7ccb15` `docs: prepare local web UI release`（6 文件，+211/−39）
+
+### 改动内容
+- `README.md`：新增「图形界面三步启动」（安装依赖 → 双击 `启动图形界面.bat` → 浏览器选卡片上传下载，写明仅监听 127.0.0.1、Ctrl+C 停止）、完整 CLI 命令参考（与 `cli.py` argparse 逐字一致）、AI 隐私/费用/Key 配置（Key 仅环境变量、真实网络请求、费用归用户、PowerShell 配置、缺 Key 逐字错误消息）、常见故障排查（端口占用复用/回退、浏览器未自动打开、依赖缺失提示、AI 缺 Key、非 UTF-8、残留进程）、Windows 支持范围（Win10/11、Python 3.11+、仅本机回环、ES6+ 浏览器、marker-pdf 以 CI 为准、无跨平台保证）。
+- `CHANGELOG.md`（新增）：`[0.2.0] - 2026-08-31`（CLI ai-clean / 本机 Web UI / BAT / 任务服务层 / CI）+ `[0.1.0]` 初始记录，Keep a Changelog 风格。
+- `format_converter/__init__.py`：`__version__` 0.1.0 → 0.2.0。
+- `docs/release-checklist.md`（新增）：测试全量 / 无真实 Key / 无临时文件 / 无 .idea / 无 .env / 无绝对用户路径 / 不 push 不建 Release，每项含验证命令。
+- `.gitignore`：补 `.env`（文件）忽略行（原仅 `.env/` 目录）。
+- `tests/test_security_invariants.py`（docstring 仅措辞）：修复潜伏自引用 bug——模块 docstring 原含 `ORCAROUTER_API_KEY = "<secret>"` 字面示例，而安全扫描会扫所有 git 跟踪文件；Step 6 提交（9f10a48）前该文件未跟踪故未被扫，提交后被跟踪即误报自身。改为纯文字描述，扫描逻辑零改动。
+
+### 测试证据
+- 最终门禁：`pytest` → **198 passed**；`compileall -q .` → 0；`git diff --check` → 通过；`python -c "from format_converter import __version__"` → 0.2.0；`git check-ignore .env` → 命中。
+- 独立核验：README 引用的 24 个文件全部存在且被跟踪；五个命令 argparse、默认路径、AI Key 错误消息、端口占用行为、依赖缺失消息均与代码/BAT 逐字一致；OrcaRouter 链接仅 `https://www.orcarouter.ai/`（无虚构链接）；全仓无真实 Key / 绝对用户路径 / 临时文件 / `.env` / `.idea`。
+
+### 审查结论
+- 最终全分支独立审查：**无 P0/P1**，P2×1（README 把 BAT「找不到 Python」与「核心依赖缺失」两分支消息归属混并）→ 修复为逐字区分两条消息后**复审发布就绪，无 P0/P1/P2**。
+- 潜伏 docstring bug 经独立核实：确为 docstring-only 修复、扫描逻辑零改动、测试 5/5 通过；成因（Step 6 提交前未跟踪不被扫）成立。
+- 全项目梳理：Step 0–7 提交链条完整，跟踪文件 42 个，无 TODO/FIXME 遗留。
+
+### 注意事项
+- **未 push、未创建 GitHub Release**（按工作单红线）。用户后续可自行决定何时 push / 打 tag / 建 Release；发布前按 `docs/release-checklist.md` 逐项核对（含手工验收项）。
