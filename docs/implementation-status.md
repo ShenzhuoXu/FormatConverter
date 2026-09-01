@@ -430,3 +430,28 @@ main 代理审阅 + 独立安全审查 + 独立复审确认的修复，全部包
 ### 注意事项
 - 未 push、未 tag、未建 Release、未使用真实 API Key、未做 UI 美化、未改 Step 4 多文件选择界面（页面当前不能多选文件属预期）。
 - 未完成 409 / 未知 404 / 无输出 404 / 无 CORS 语义保持不变；仅 `127.0.0.1`；响应体、status message、ZIP entry 均不含绝对临时路径与 API Key。
+
+## Step 4 — Web UI 重设计（多文件选择）
+
+### 状态：✅ 验收通过（2026-09-01）
+
+### 范围
+- 重设计既有单页 Web UI：顶部任务类型分段控制器 + 单一工作面板（替代四张重复卡片），前端真正支持多文件选择并通过 `uploads` 数组提交（单文件同样走 `uploads`）。未改 Python 后端协议（Step 2 批量协议与 Step 3 下载规则原样复用）、未改 CLI、未引入新依赖、未使用真实 API Key、未削弱 Key/.env/会话令牌安全逻辑。
+
+### 提交
+- `ba1ae0e` `feat: redesign web UI with multi-file selection`（7 文件，+1097/−459）
+
+### 改动内容
+- `format_converter/web/static/index.html`：重设计为中央聚焦卡片流——头部品牌 + 「🟢 本地服务就绪 / 🛡️ 数据不出站」徽标、隐私提示条、`#mode-selector` 分段控制器（convert/clean/pipeline/ai-clean）、`#work-panel` 单一工作面板（标题/描述随模式切换）、`#ai-key-section`（仅 ai-clean 模式展开，保留全部 `data-key-*` hook、`#ai-api-key` 密码框与既有隐私文案）、`#model-field`（仅 ai-clean）、`#drop-zone`（点击/拖拽多选，`input[type=file]` 带 `multiple` 且 `hidden`）、`#file-list` + `#file-summary` + `#clear-files-btn`、`#start-btn`、`#status`/`#error`/`#download-area`。无外链资源、无 localStorage、无 console。
+- `format_converter/web/static/app.js`：保留单例 IIFE；新增 `formatBytes`/`getSelectedFiles`/`validateFiles`/`readFileAsDataUrl`/`readUploads`/`renderFileList`/`clearFiles` 等小函数；`appState` 内存态（mode/files/currentJobId）刷新即重置；选择/拖拽即时校验扩展名（convert/pipeline→`.pdf`，clean/ai-clean→`.md`）、重复文件名（大小写不敏感）与空文件，任一不符即阻止提交并明确提示；提交 payload 统一 `uploads: [...]`（即使单文件，不再依赖 `files[0]`）；模式切换保留已选文件、按新扩展名规则重新标记、清空旧下载/错误状态；下载按钮统一「下载结果」（不预测格式）；AI Key 区行为不退化（保存/清除后清空输入、会话令牌头、password 输入）。
+- `format_converter/web/static/styles.css`：Google/ChatGPT 式克制风格（背景 `#F7F9FC`、主色 `#1A73E8`、成功 `#188038`、错误 `#D93025`、8px 栅格、圆角 ≤8px、系统字体栈），移动端不横向溢出；无紫色渐变、无外部资源。
+- `tests/test_web_ui.py`（10 → 21）：新增多文件断言——所有 file input 含 `multiple`、页面含文件列表/数量与大小摘要/清空按钮、按钮文案「下载结果」且无「下载 ZIP」、HTML/JS/CSS 均无 localStorage/sessionStorage/indexedDB/document.cookie/console.log/外部 `http(s)://`、JS 使用 `uploads` 字段、JS 无 `files[0]` 且定义全部多文件辅助函数、AI Key 区默认折叠（`hidden = !isAi`）；新增 `uploads` 单文件端到端流程（提交→轮询→下载 `.md`）；既有 `upload` 单文件兼容流程保留。
+- 文档：`CHANGELOG.md`（[Unreleased] 增 Web UI 重设计 + 多文件选择）、`README.md`（四任务描述最小事实修正为「一个或多个文件」）、`docs/verification-checklist.md`（新增 Step 4 多文件手工验收项）。
+
+### 测试证据
+- `pytest tests/test_web_ui.py` → **21 passed**；`pytest tests/test_web_server.py` → **68 passed**；全量 `pytest` → **286 passed**（272 + 14）；`compileall -q .` → 0；`node --check app.js` → 通过；`git diff --check` → 通过（仅 autocrlf 提示）；静态目录 grep 0 命中（无 forbidden token / 无外部 URL）；所有测试临时目录已删除；`git status --short` 提交后为空。
+- 后端零改动：本步未改 `web_server.py` / `jobs.py` / `cli.py`，批量协议、下载规则、安全边界（127.0.0.1、无 CORS、会话令牌 key 端点）均保持不变。
+
+### 注意事项
+- 未 push、未 tag、未建 Release、未改写历史；未使用真实 API Key；未引入外部资源；未引入浏览器持久化存储。
+- 验收命令中 `rg` 在 PowerShell 不可用（非项目问题），改用等价 ripgrep（Grep 工具）核对；README/docs/CHANGELOG 中出现的 `https://` 均为回环地址或官方链接，`下载 ZIP`/`files[0]` 仅出现在测试断言与历史记录中（均明确标注）。
