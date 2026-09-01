@@ -656,7 +656,7 @@ class JobWebServer:
             if not isinstance(data_b64, str) or not data_b64.strip():
                 return self._send_json(handler, 400, {"error": "Missing upload data."})
             try:
-                data = base64.b64decode(data_b64)
+                data = base64.b64decode(data_b64, validate=True)
             except Exception:  # noqa: BLE001 - malformed base64
                 return self._send_json(handler, 400, {"error": "Invalid base64 upload data."})
             if not data:

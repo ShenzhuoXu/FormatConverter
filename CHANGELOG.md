@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### 修复
+
+- Web 上传 base64 解码改为严格校验：`base64.b64decode(data_b64, validate=True)`。此前默认模式会丢弃非法字符，导致 `YQ==!!!!` 这类含非法后缀的 payload 被剥离后解出非空 bytes 并接受（返回 202）。现此类 payload 返回 400 且不创建 job / 不写临时文件。
+
 ### 新增
 
 - Web API 支持多文件上传：`POST /api/jobs` 现接受 `uploads` 数组字段（每项含 `filename` / `data_b64`），一次提交多个文件并按同一任务类型处理。`convert`/`clean`/`pipeline` 在多文件时切换为目录模式复用既有 worker；`ai-clean` 新增目录批量模式（遍历 `input_dir` 下 `.md`，逐个输出 `<stem>.ai.md`），单文件 CLI 契约不变。单次上传上限 50 个文件；同请求内文件名大小写不敏感去重；任一文件名/扩展名/base64 非法则整请求 400、不创建部分输出。旧单文件 `upload` 字段保持兼容（同时传 `upload` 与 `uploads` 返回 400）。

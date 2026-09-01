@@ -735,6 +735,42 @@ class TestMultiUploadValidation:
         after = {p.name for p in base.iterdir()}
         assert after == before
 
+    def test_strict_base64_rejects_garbage_suffix_400(self, make_server) -> None:
+        # "YQ==" decodes to b"a"; appending non-base64 characters must NOT be
+        # silently discarded (the lax default would accept it as b"a").
+        server, port = make_server()
+        payload = {
+            "job_type": "clean", "params": {},
+            "uploads": [{"filename": "a.md", "data_b64": "YQ==!!!!"}],
+        }
+        assert _post_raw(port, payload) == 400
+
+    def test_strict_base64_rejects_non_base64_chars_400(self, make_server) -> None:
+        server, port = make_server()
+        payload = {
+            "job_type": "clean", "params": {},
+            "uploads": [{"filename": "a.md", "data_b64": "%%%not-base64%%%"}],
+        }
+        assert _post_raw(port, payload) == 400
+
+    def test_invalid_base64_creates_no_partial_job(self, make_server) -> None:
+        server, port = make_server()
+        base = server.base_temp_dir
+        assert base is not None
+        before = {p.name for p in base.iterdir()}
+        # One valid file + one file whose base64 has a garbage suffix: the
+        # whole request must fail and leave no job directory on disk.
+        payload = {
+            "job_type": "clean", "params": {},
+            "uploads": [
+                {"filename": "a.md", "data_b64": _b64("# ok")},
+                {"filename": "b.md", "data_b64": "YQ==!!!!"},
+            ],
+        }
+        assert _post_raw(port, payload) == 400
+        after = {p.name for p in base.iterdir()}
+        assert after == before
+
 
 # ---------------------------------------------------------------------------
 # security: non-loopback, static traversal, temp cleanup
