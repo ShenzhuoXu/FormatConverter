@@ -5,6 +5,12 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 移除
+
+- 删除 5 个历史兼容脚本：`convert.py`、`convert2.py`、`clean_md.py`、`clean_md_keep_lists.py`、`join_paragraphs.py`。它们只是转发到 `format_converter.cli.main` 的薄包装（`join_paragraphs.py` 的能力是 `clean` 命令的子集），功能已完全由 `python main.py convert / marker / clean / pipeline` 与图形界面覆盖，且无任何代码、测试或启动脚本引用。当前入口统一为：图形界面（双击 `启动图形界面.bat`）、CLI（`python main.py ...`）、Web 服务（`python -m format_converter.web_server`）。
+
 ## [0.2.1] - 2026-09-01
 
 ### 新增

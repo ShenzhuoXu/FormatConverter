@@ -26,11 +26,6 @@ FormatConverter/
   启动图形界面.bat       # Windows 一键启动脚本（双击运行）
   打开我.html            # 服务未启动时的说明页
   main.py                # 本地运行入口
-  convert.py             # 兼容旧脚本入口
-  convert2.py            # marker-pdf 单文件转换入口
-  clean_md.py            # 兼容旧脚本入口
-  clean_md_keep_lists.py # 兼容旧脚本入口
-  join_paragraphs.py     # 兼容旧脚本入口
 ```
 
 ## 图形界面三步启动
@@ -290,4 +285,4 @@ GitHub Actions 工作流（`.github/workflows/tests.yml`）会在 `windows-lates
 
 ## 维护说明
 
-原来的脚本已经改成兼容入口。以后需要改转换逻辑时，优先修改 `format_converter/pdf_converter.py`；需要改 Markdown 清理规则时，优先修改 `format_converter/markdown_cleaner.py`；需要调整 AI 校对（分块、提示词、Provider 预设、客户端封装）时，优先修改 `format_converter/ai_cleaner.py`、`format_converter/providers.py` 和 `format_converter/llm_client.py`，并同步更新 `tests/`。任务服务层在 `format_converter/jobs.py`，本机 Web 服务与图形界面分别在 `format_converter/web_server.py` 与 `format_converter/web/static/`。
+当前入口统一为：图形界面（双击 `启动图形界面.bat`）、CLI（`python main.py ...`）、Web 服务（`python -m format_converter.web_server`）。以后需要改转换逻辑时，优先修改 `format_converter/pdf_converter.py`；需要改 Markdown 清理规则时，优先修改 `format_converter/markdown_cleaner.py`；需要调整 AI 校对（分块、提示词、Provider 预设、客户端封装）时，优先修改 `format_converter/ai_cleaner.py`、`format_converter/providers.py` 和 `format_converter/llm_client.py`，并同步更新 `tests/`。任务服务层在 `format_converter/jobs.py`，本机 Web 服务与图形界面分别在 `format_converter/web_server.py` 与 `format_converter/web/static/`。
