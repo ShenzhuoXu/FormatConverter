@@ -14,8 +14,8 @@ import pytest
 from format_converter.model_store import add_model, delete_model, list_models, validate_model
 
 # Built at runtime from two literals so the joined secret never appears as a
-# contiguous sk- token in the tracked source (the repo-wide key scan must
-# stay clean); behaviorally it is exactly "sk-THISISAREALKEY123456".
+# contiguous token in the tracked source (the repo-wide key scan must stay
+# clean). Behaviorally it is a realistic secret-shaped model name.
 _SECRET_SHAPED = "sk-" + "THISISAREALKEY123456"
 _LEGIT = "deepseek/deepseek-v4-flash-free"
 
