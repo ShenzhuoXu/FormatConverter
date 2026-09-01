@@ -1,10 +1,20 @@
-"""Offline tests for the packaged single-page web UI (Step 4).
+"""Offline tests for the packaged single-page web UI (Step 4 redesign).
 
 Everything runs against a real localhost socket using only the standard
 library (``http.client``): no browser, no browser automation, and no third
 party dependencies. ``create_server()`` now defaults its ``static_dir`` to the
 packaged ``format_converter/web/static`` directory, so the UI is served out of
 the box.
+
+The UI contract covered here:
+
+- One shared file picker with ``multiple``, a drop zone, a per-file list,
+  a count/size summary, and a clear button.
+- The frontend always submits through the ``uploads`` array (even for a
+  single file) and never relies on ``files[0]`` as the only upload.
+- The download button text is always ``下载结果`` (the format is decided by
+  the backend, never predicted by the frontend).
+- No persistent browser storage, no third-party resources, no console.log.
 """
 
 from __future__ import annotations
@@ -27,6 +37,15 @@ STATIC_DIR = ROOT / "format_converter" / "web" / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
 APP_JS = STATIC_DIR / "app.js"
 STYLES_CSS = STATIC_DIR / "styles.css"
+
+# Anything that would violate the "zero persistence / zero telemetry" rule.
+FORBIDDEN_TOKENS = (
+    "localStorage",
+    "sessionStorage",
+    "indexedDB",
+    "document.cookie",
+    "console.log",
+)
 
 
 def _is_same_origin_static(url: str) -> bool:
@@ -175,21 +194,33 @@ class TestPageSourceCompliance:
 
     def test_app_js_has_no_forbidden_content(self) -> None:
         js = APP_JS.read_text(encoding="utf-8")
-        assert "localStorage" not in js
-        assert "cookie" not in js
+        for token in FORBIDDEN_TOKENS:
+            assert token not in js, f"app.js contains forbidden token {token!r}"
         assert 'fetch("http' not in js
         assert 'fetch(`http' not in js
-        assert "sessionStorage" not in js
-        assert "indexedDB" not in js
-        assert "console.log" not in js
+        assert "http://" not in js and "https://" not in js
         # The key request flow sends the session token header and clears the
         # password input after each request.
         assert "X-FC-Session-Token" in js
         assert 'value = ""' in js
 
+    def test_styles_css_has_no_forbidden_content(self) -> None:
+        css = STYLES_CSS.read_text(encoding="utf-8")
+        for token in FORBIDDEN_TOKENS:
+            assert token not in css, f"styles.css contains forbidden token {token!r}"
+        assert "http://" not in css and "https://" not in css
+
+    def test_no_external_urls_in_any_static_file(self) -> None:
+        # A static file that is not itself an external resource must never
+        # reference one: no absolute http(s) URLs anywhere in the packaged UI.
+        for path in (INDEX_HTML, APP_JS, STYLES_CSS):
+            text = path.read_text(encoding="utf-8")
+            assert "http://" not in text, f"external URL in {path.name}"
+            assert "https://" not in text, f"external URL in {path.name}"
+
     def test_index_contains_key_config_region(self) -> None:
         html = INDEX_HTML.read_text(encoding="utf-8")
-        # The new OrcaRouter API config region: password input + copy + buttons.
+        # The OrcaRouter API config region: password input + copy + buttons.
         assert 'type="password"' in html
         assert 'id="ai-api-key"' in html
         assert 'name="api_key"' in html
@@ -202,10 +233,20 @@ class TestPageSourceCompliance:
         assert 'data-key-save' in html
         assert 'data-key-clear' in html
         assert 'data-key-detect' in html
+        assert 'data-key-config-status' in html
+        assert 'data-key-section' in html
         assert "保存到本地" in html
         assert "清除本地 Key" in html
         assert "重新检测" in html
-        assert 'data-key-config-status' in html
+
+    def test_ai_key_section_collapsed_by_default(self) -> None:
+        # The AI key region only expands in ai-clean mode; the default mode
+        # (convert) must start with it collapsed. app.js toggles it on switch.
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "hidden = !isAi" in js
+        # The section is discoverable and has a stable container hook.
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        assert 'id="ai-key-section"' in html
 
     def test_index_contains_session_token_placeholder(self) -> None:
         html = INDEX_HTML.read_text(encoding="utf-8")
@@ -215,6 +256,53 @@ class TestPageSourceCompliance:
         assert "__FC_SESSION_TOKEN__" in html
         assert "sessionStorage" not in html
         assert "indexedDB" not in html
+
+    def test_all_file_inputs_have_multiple(self) -> None:
+        # Every file picker on the page must allow selecting more than one file.
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        inputs = re.findall(r'<input\b[^>]*\btype="file"[^>]*>', html)
+        assert inputs, "no file input at all"
+        for tag in inputs:
+            assert re.search(r"\bmultiple\b", tag), f"file input lacks multiple: {tag}"
+
+    def test_page_has_file_list_summary_and_clear(self) -> None:
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        assert 'id="file-list"' in html  # per-file list
+        assert 'id="file-summary"' in html  # count / size summary
+        assert 'id="clear-files-btn"' in html  # clear button
+        assert "清空" in html
+
+    def test_download_button_text_is_download_result(self) -> None:
+        # The download control is always labelled "下载结果"; the format is
+        # decided by the backend, never predicted by the frontend.
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        js = APP_JS.read_text(encoding="utf-8")
+        css = STYLES_CSS.read_text(encoding="utf-8")
+        assert "下载结果" in js or "下载结果" in html
+        for text in (html, js, css):
+            assert "下载 ZIP" not in text
+
+    def test_app_js_uses_uploads_field(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "uploads" in js
+        assert "uploads:" in js  # the submit payload always carries the array
+        assert "job_type" in js
+
+    def test_app_js_reads_all_selected_files(self) -> None:
+        # The UI must never upload only the first selected file, and it must
+        # define the multi-file helpers (per the Step 4 design spec).
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "files[0]" not in js
+        for helper in (
+            "formatBytes",
+            "getSelectedFiles",
+            "validateFiles",
+            "readFileAsDataUrl",
+            "readUploads",
+            "renderFileList",
+            "clearFiles",
+        ):
+            assert helper in js, f"app.js missing helper {helper}"
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +328,7 @@ class TestJsSyntax:
 
 class TestEndToEndFlow:
     def test_clean_flow_upload_poll_download(self, server) -> None:
+        # Legacy single 'upload' field must keep working through the server.
         content = "# Doc\n\nAlpha.\n\nAlpha.\n\nBeta.\n"
         status, _, data = _post_clean(server.port, content)
         assert status == 202
@@ -258,4 +347,35 @@ class TestEndToEndFlow:
 
         extracted = data.decode("utf-8")
         assert extracted == "# Doc\n\nAlpha.\n\nBeta.\n"
+        assert extracted.count("Alpha.") == 1  # dedupe actually ran
+
+    def test_clean_flow_uploads_single_file_poll_download(self, server) -> None:
+        # The redesigned UI always submits through the 'uploads' array, even
+        # for a single file; the server must accept it and stream one .md.
+        content = "# Doc\n\nAlpha.\n\nAlpha.\n\nBeta.\n"
+        payload = {
+            "job_type": "clean",
+            "params": {},
+            "uploads": [{"filename": "doc.md", "data_b64": _b64(content)}],
+        }
+        body = json.dumps(payload).encode("utf-8")
+        status, _, data = _request(
+            server.port,
+            "POST",
+            "/api/jobs",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(server.port, job_id)
+        assert final["status"] == "succeeded"
+
+        status, headers, data = _request(server.port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        assert headers["Content-Type"] != "application/zip"
+        assert 'filename="doc.md"' in headers["Content-Disposition"]
+
+        extracted = data.decode("utf-8")
         assert extracted.count("Alpha.") == 1  # dedupe actually ran
