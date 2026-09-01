@@ -102,7 +102,7 @@ _INDEX_HTML = """\
   <li><code>GET /health</code> — health check</li>
   <li><code>POST /api/jobs</code> — submit a job (<code>convert</code>, <code>clean</code>, <code>pipeline</code>, <code>ai-clean</code>)</li>
   <li><code>GET /api/jobs/{id}</code> — job status</li>
-  <li><code>GET /api/jobs/{id}/download</code> — download job output as a ZIP archive</li>
+  <li><code>GET /api/jobs/{id}/download</code> — download job output (a single file, or a ZIP for multiple outputs)</li>
 </ul>
 </body>
 </html>
@@ -804,10 +804,32 @@ class JobWebServer:
         if job_dir is None or not job_dir.is_dir():
             return self._send_json(handler, 404, {"error": "No output available."})
 
-        zip_data = self._build_zip(result, job_dir.resolve())
-        if zip_data is None:
+        job_root = job_dir.resolve()
+        files = self._collect_download_files(result, job_root)
+        if not files:
             return self._send_json(handler, 404, {"error": "No output files available."})
 
+        if len(files) == 1:
+            # Single final output: stream the file directly, no ZIP wrapper.
+            src = files[0]
+            try:
+                data = src.read_bytes()
+            except OSError:
+                return self._send_json(handler, 404, {"error": "No output files available."})
+            content_type = mimetypes.guess_type(src.name)[0] or "application/octet-stream"
+            self._send_bytes(
+                handler,
+                200,
+                data,
+                content_type,
+                {"Content-Disposition": f'attachment; filename="{src.name}"'},
+            )
+            return
+
+        # Multiple final outputs: package them into a ZIP with root-level names.
+        zip_data = self._build_zip(files, job_id)
+        if zip_data is None:
+            return self._send_json(handler, 404, {"error": "No output files available."})
         self._send_bytes(
             handler,
             200,
@@ -816,31 +838,61 @@ class JobWebServer:
             {"Content-Disposition": f'attachment; filename="{job_id}.zip"'},
         )
 
-    def _build_zip(self, result: object, job_root: Path) -> bytes | None:
-        """Package this job's own output files into an in-memory ZIP.
+    def _collect_download_files(self, result: object, job_root: Path) -> list[Path]:
+        """Resolve the job's final output files, all inside ``job_root``.
 
         Every path is taken from ``JobResult.output_paths`` and re-validated
         against ``job_root``; anything outside the job's private directory is
-        silently skipped, so a client can never request arbitrary paths.
+        silently skipped, so a client can never download arbitrary paths.
+        Directory outputs are expanded recursively to their contained files.
         """
+        collected: list[Path] = []
+        for out in getattr(result, "output_paths", ()):
+            src = Path(out)
+            try:
+                if not src.resolve().is_relative_to(job_root):
+                    continue
+            except (OSError, ValueError):
+                continue
+            if src.is_dir():
+                for file_path in sorted(src.rglob("*")):
+                    if file_path.is_file():
+                        collected.append(file_path)
+            elif src.is_file():
+                collected.append(src)
+        return collected
+
+    def _download_name_for(self, path: Path, used_names: set[str]) -> str:
+        """Return a stable, collision-free ZIP entry name for ``path``.
+
+        First occurrence keeps the file's own basename; later duplicates get a
+        numeric suffix before the final extension (``doc.md`` -> ``doc-2.md``,
+        ``doc.ai.md`` -> ``doc.ai-2.md``). Never silently overwrites an entry.
+        """
+        name = path.name
+        if name not in used_names:
+            used_names.add(name)
+            return name
+        suffix = path.suffix
+        stem = name[: -len(suffix)] if suffix else name
+        index = 2
+        while True:
+            candidate = f"{stem}-{index}{suffix}"
+            if candidate not in used_names:
+                used_names.add(candidate)
+                return candidate
+            index += 1
+
+    def _build_zip(self, files: list[Path], job_id: str) -> bytes | None:
+        """Package ``files`` into an in-memory ZIP using root-level names."""
         buffer = io.BytesIO()
+        used_names: set[str] = set()
         added = False
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            for out in getattr(result, "output_paths", ()):
-                src = Path(out)
-                try:
-                    rel = src.resolve().relative_to(job_root)
-                except ValueError:
-                    # Not inside this job's own directory: never package it.
-                    continue
-                if src.is_dir():
-                    for file_path in sorted(src.rglob("*")):
-                        if file_path.is_file():
-                            archive.write(str(file_path), file_path.relative_to(job_root).as_posix())
-                            added = True
-                elif src.is_file():
-                    archive.write(str(src), rel.as_posix())
-                    added = True
+            for src in files:
+                name = self._download_name_for(src, used_names)
+                archive.write(str(src), name)
+                added = True
         if not added:
             return None
         return buffer.getvalue()

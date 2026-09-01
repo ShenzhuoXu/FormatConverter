@@ -397,3 +397,36 @@ main 代理审阅 + 独立安全审查 + 独立复审确认的修复，全部包
 - 未 push、未 tag、未建 Release、未使用真实 API Key、未改 Step 3 下载规则、未做 UI 美化。
 - Web 仍只绑定 `127.0.0.1`；Key/.env/会话令牌安全逻辑未削弱（无 CORS、无 Key 落浏览器、写/删仍需令牌 + 回环校验）。
 - 旧 `upload` 单文件协议仍可用；`python main.py --help` 仍正常。
+
+## Step 3 — Web 下载规则改进
+
+### 状态：✅ 验收通过（2026-09-01）
+
+### 范围
+- 改良下载行为：单个最终输出文件直接下载该文件（不打 ZIP）；多个最终输出文件下载 ZIP 且 ZIP 根目录不再包含 `input/` / `output/`，条目为最终产物文件名。不改 UI 美化、不改文件选择框 `multiple`（留 Step 4）、不改 API Key/.env/会话令牌逻辑、不改 CLI、不引入新依赖、不写绝对临时路径进响应体/日志/ZIP/文档示例。
+
+### 下载规则（最终行为）
+- 从 `JobResult.output_paths` 读取输出路径，逐个 `resolve().is_relative_to(job_root)` 重新校验；目录递归展开为文件；越界路径跳过。
+- 无文件 → 404；1 个文件 → 直接返回该文件 bytes（`Content-Disposition: attachment; filename="<name>"`，`Content-Type` 用 `mimetypes.guess_type()` 兜底 `application/octet-stream`）；>1 个文件 → ZIP（`Content-Disposition: attachment; filename="<job_id>.zip"`）。
+- ZIP 条目默认用最终文件名（`a.md`、`b.md`、`a.ai.md`、`b.ai.md`）；同名冲突稳定重命名（首个保留原名，后续 `stem-2.suffix`：`doc.md`→`doc-2.md`、`doc.ai.md`→`doc.ai-2.md`），绝不静默覆盖。
+- 下载层只改打包/命名，不改 job output 生成路径（`input/`/`output/` 目录结构仍保留在 job 私有目录内）。
+
+### 改动内容
+- `format_converter/web_server.py`：
+  - `_send_job_download` 重构：`_collect_download_files(result, job_root)` → 无文件 404 / 单文件直接 `_send_bytes`（mimetypes 类型 + 文件名）/ 多文件 `_build_zip(files, job_id)`。
+  - 新增 `_collect_download_files`（越界路径跳过、目录递归、仅收文件）与 `_download_name_for`（稳定去重命名）。
+  - `_build_zip` 改为接收文件列表 + job_id，entry 用根级下载名。
+  - 备用 `_INDEX_HTML` 的 download 描述同步为「单文件或 ZIP」。
+- `format_converter/web/static/app.js`：下载按钮文字「下载 ZIP」→「下载结果」（格式由后端决定）。
+- `README.md`：四张卡片描述做最小事实修正——单个输出直接下载、多个输出打包 ZIP。
+
+### 测试
+- `tests/test_web_server.py`（+5 `TestDownloadRules`）：越界路径跳过（单独→404 且不泄外部路径；混合→保留内部文件直下载）、同名冲突（`doc.md`/`doc-2.md`）、双后缀冲突（`doc.ai.md`/`doc.ai-2.md`）、目录输出递归收集（ZIP names `one.md`/`two.md`）。并同步更新既有断言：clean/convert/ai-clean 单文件 → 直接下载（非 ZIP、`filename="..."`、body 即文件内容）；pipeline/批量 → ZIP 根级条目、无 `input/`/`output/` 前缀。
+- `tests/test_web_ui.py`：clean 全流程下载改为直接 Markdown bytes（非 ZIP）。
+
+### 测试证据
+- `pytest tests/test_web_server.py` → **63 passed**；`pytest tests/test_web_ui.py` → **17 passed**；全量 `pytest` → **272 passed**；`compileall -q .` → 0；`git diff --check` → 通过（仅 autocrlf 提示）；所有测试临时目录已删除；`git status --short` 仅含本步文件。
+
+### 注意事项
+- 未 push、未 tag、未建 Release、未使用真实 API Key、未做 UI 美化、未改 Step 4 多文件选择界面（页面当前不能多选文件属预期）。
+- 未完成 409 / 未知 404 / 无输出 404 / 无 CORS 语义保持不变；仅 `127.0.0.1`；响应体、status message、ZIP entry 均不含绝对临时路径与 API Key。

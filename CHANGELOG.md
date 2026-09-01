@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### 变更
+
+- Web 下载行为改进：单个最终输出文件时，`GET /api/jobs/{id}/download` 直接返回该文件（`Content-Disposition` 带文件名，`Content-Type` 按 `mimetypes` 判断），不再打包 ZIP；多个最终输出文件时仍返回 ZIP，但 ZIP 内不再包含 `input/` / `output/` 文件夹，条目使用最终产物文件名（如 `a.md`、`a.ai.md`）。同名条目稳定重命名（`doc.md` → `doc-2.md`、`doc.ai.md` → `doc.ai-2.md`），不静默覆盖。
+
 ### 修复
 
 - Web 上传 base64 解码改为严格校验：`base64.b64decode(data_b64, validate=True)`。此前默认模式会丢弃非法字符，导致 `YQ==!!!!` 这类含非法后缀的 payload 被剥离后解出非空 bytes 并接受（返回 202）。现此类 payload 返回 400 且不创建 job / 不写临时文件。

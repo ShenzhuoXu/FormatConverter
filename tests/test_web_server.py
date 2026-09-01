@@ -249,18 +249,16 @@ class TestSubmitAndDownload:
         raw_status = json.dumps(final).encode("utf-8")
         assert str(server.base_temp_dir) not in raw_status.decode("utf-8")
 
-        # Download the ZIP and verify it is exactly the cleaned result.
+        # Download: a single output file is returned directly (not a ZIP).
         status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
         assert status == 200
-        assert headers["Content-Type"] == "application/zip"
-        assert "attachment" in headers["Content-Disposition"]
+        assert headers["Content-Type"] != "application/zip"
+        assert 'filename="doc.md"' in headers["Content-Disposition"]
         assert "Access-Control-Allow-Origin" not in headers
+        # A direct file response must not be a ZIP archive.
+        assert not data.startswith(b"PK\x03\x04")
 
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            names = archive.namelist()
-            assert names == ["input/doc.md"]  # job-relative, no absolute path
-            extracted = archive.read("input/doc.md").decode("utf-8")
-
+        extracted = data.decode("utf-8")
         assert extracted == "# Doc\n\nAlpha.\n\nBeta.\n"
         assert extracted.count("Alpha.") == 1  # dedupe ran
         job_dir = server.base_temp_dir / job_id
@@ -345,7 +343,7 @@ class TestFailures:
 class TestAdditionalE2E:
     def test_convert_success_e2e(self, make_server, monkeypatch) -> None:
         # The real pymupdf4llm is not installed; the worker is faked while the
-        # whole web path (upload -> job -> status -> download ZIP) is exercised.
+        # whole web path (upload -> job -> status -> download) is exercised.
         monkeypatch.setattr("format_converter.jobs.convert_pdf_file", _fake_convert_file)
         server, port = make_server()
 
@@ -356,12 +354,13 @@ class TestAdditionalE2E:
         final = _wait_terminal(port, job_id)
         assert final["status"] == "succeeded"
 
+        # Single output file -> direct download, not a ZIP.
         status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
         assert status == 200
-        assert headers["Content-Type"] == "application/zip"
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            assert archive.namelist() == ["output/doc.md"]
-            assert archive.read("output/doc.md").decode("utf-8") == "# converted"
+        assert headers["Content-Type"] != "application/zip"
+        assert 'filename="doc.md"' in headers["Content-Disposition"]
+        assert data.decode("utf-8") == "# converted"
+        assert not data.startswith(b"PK\x03\x04")
 
     def test_pipeline_success_e2e(self, make_server, monkeypatch) -> None:
         monkeypatch.setattr("format_converter.jobs.run_pipeline", _fake_run_pipeline)
@@ -374,12 +373,15 @@ class TestAdditionalE2E:
         final = _wait_terminal(port, job_id)
         assert final["status"] == "succeeded"
 
+        # Two outputs -> ZIP, entries at the root (no input/output prefix).
         status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
         assert status == 200
         assert headers["Content-Type"] == "application/zip"
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            assert "output/doc.md" in archive.namelist()
-            assert archive.read("output/doc.md").decode("utf-8") == "# pipelined"
+            names = archive.namelist()
+            assert "doc.md" in names
+            assert "doc.cleaned.md" in names
+            assert not any(n.startswith(("input/", "output/")) for n in names)
 
     def test_ai_clean_success_e2e(self, make_server, monkeypatch) -> None:
         # The web layer resolves the API key inside jobs; a faked ai_clean keeps
@@ -396,12 +398,13 @@ class TestAdditionalE2E:
         final = _wait_terminal(port, job_id)
         assert final["status"] == "succeeded"
 
+        # Single output file -> direct download, not a ZIP.
         status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
         assert status == 200
-        assert headers["Content-Type"] == "application/zip"
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            assert archive.namelist() == ["output/doc.ai.md"]
-            assert archive.read("output/doc.ai.md").decode("utf-8") == "# ai cleaned"
+        assert headers["Content-Type"] != "application/zip"
+        assert 'filename="doc.ai.md"' in headers["Content-Disposition"]
+        assert data.decode("utf-8") == "# ai cleaned"
+        assert not data.startswith(b"PK\x03\x04")
 
     def test_download_succeeded_but_no_output_files_404(self, make_server) -> None:
         server, port = make_server()
@@ -441,10 +444,10 @@ class TestAdditionalE2E:
         job_dir = server.base_temp_dir / job_id
         assert (job_dir / "input" / "doc.bak.md").is_file()  # backup ran (default True)
 
-        status, _, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
         assert status == 200
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            extracted = archive.read("input/doc.md").decode("utf-8")
+        assert headers["Content-Type"] != "application/zip"
+        extracted = data.decode("utf-8")
         assert extracted.count("Alpha.") == 1  # dedupe still ran (default True)
 
 
@@ -468,9 +471,9 @@ class TestMultiUpload:
         assert "Access-Control-Allow-Origin" not in headers
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             names = sorted(archive.namelist())
-            assert names == ["input/a.md", "input/b.md"]
-            a = archive.read("input/a.md").decode("utf-8")
-            b = archive.read("input/b.md").decode("utf-8")
+            assert names == ["a.md", "b.md"]  # no input/ prefix
+            a = archive.read("a.md").decode("utf-8")
+            b = archive.read("b.md").decode("utf-8")
         assert a.count("Alpha.") == 1  # dedupe ran per file
         assert b.count("Gamma.") == 1
         # No absolute server path may leak in any response body.
@@ -497,7 +500,7 @@ class TestMultiUpload:
         status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
         assert status == 200
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            assert sorted(archive.namelist()) == ["output/a.md", "output/b.md"]
+            assert sorted(archive.namelist()) == ["a.md", "b.md"]
         assert str(server.base_temp_dir).encode() not in data
 
     def test_batch_pipeline_success_e2e(self, make_server, monkeypatch) -> None:
@@ -524,8 +527,11 @@ class TestMultiUpload:
         assert status == 200
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             names = archive.namelist()
-            assert "output/a.md" in names
-            assert "output/b.md" in names
+            assert "a.md" in names
+            assert "b.md" in names
+            assert "a.cleaned.md" in names
+            assert "b.cleaned.md" in names
+            assert not any(n.startswith(("input/", "output/")) for n in names)
         assert str(server.base_temp_dir).encode() not in data
 
     def test_batch_ai_clean_success_e2e(self, make_server, monkeypatch) -> None:
@@ -555,7 +561,7 @@ class TestMultiUpload:
         status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
         assert status == 200
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            assert sorted(archive.namelist()) == ["output/a.ai.md", "output/b.ai.md"]
+            assert sorted(archive.namelist()) == ["a.ai.md", "b.ai.md"]
         # No API key material or absolute path leaks anywhere.
         assert b"sk-" not in data
         assert "sk-" not in json.dumps(final)
@@ -770,6 +776,146 @@ class TestMultiUploadValidation:
         assert _post_raw(port, payload) == 400
         after = {p.name for p in base.iterdir()}
         assert after == before
+
+
+# ---------------------------------------------------------------------------
+# download rules: single file direct / multi-file ZIP with root entries
+# ---------------------------------------------------------------------------
+
+
+class TestDownloadRules:
+    def test_output_path_outside_job_root_skipped_404(self, make_server) -> None:
+        server, port = make_server()
+        manager = server._manager
+        outside = server.base_temp_dir.parent / "outside-secret.txt"
+        outside.write_text("secret outside", encoding="utf-8")
+        # Handler claims a path outside this job's private directory.
+        manager.handlers["clean"] = lambda _params: ((outside,), "done")
+
+        status, _, data = _post_job(port, "clean", {}, "doc.md", "# x")
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+        assert _wait_terminal(port, job_id)["status"] == "succeeded"
+
+        # The outside path must be skipped and (with nothing else) yield 404.
+        status, _, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 404
+        assert "No output files available" in data.decode("utf-8")
+        assert outside.name not in data.decode("utf-8")
+        outside.unlink(missing_ok=True)
+
+    def test_output_path_outside_job_root_skipped_keeps_inside(self, make_server) -> None:
+        server, port = make_server()
+        outside = server.base_temp_dir.parent / "outside-keep.txt"
+        outside.write_text("secret outside", encoding="utf-8")
+
+        def _mixed(_params: dict) -> tuple[tuple[Path, ...], str]:
+            job_dir = server.base_temp_dir
+            inside = max((d for d in job_dir.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime)
+            legit = inside / "ok.md"
+            legit.write_text("# ok", encoding="utf-8")
+            return (outside, legit), "done"
+
+        manager = server._manager
+        manager.handlers["clean"] = _mixed
+        status, _, data = _post_job(port, "clean", {}, "doc.md", "# x")
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+        assert _wait_terminal(port, job_id)["status"] == "succeeded"
+
+        # Outside path is skipped; the single remaining file downloads directly.
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        assert headers["Content-Type"] != "application/zip"
+        assert 'filename="ok.md"' in headers["Content-Disposition"]
+        assert data.decode("utf-8") == "# ok"
+        assert outside.name not in data.decode("utf-8", errors="replace")
+        outside.unlink(missing_ok=True)
+
+    def test_zip_same_name_conflict_renamed_stably(self, make_server) -> None:
+        server, port = make_server()
+        manager = server._manager
+
+        def _dupe_names(_params: dict) -> tuple[tuple[Path, ...], str]:
+            job_dir = server.base_temp_dir
+            job_id = max((d.name for d in job_dir.iterdir() if d.is_dir()), key=lambda n: n)
+            a = job_dir / job_id / "a" / "doc.md"
+            b = job_dir / job_id / "b" / "doc.md"
+            a.parent.mkdir(parents=True, exist_ok=True)
+            b.parent.mkdir(parents=True, exist_ok=True)
+            a.write_text("# first", encoding="utf-8")
+            b.write_text("# second", encoding="utf-8")
+            return (a, b), "done"
+
+        manager.handlers["clean"] = _dupe_names
+        status, _, data = _post_job(port, "clean", {}, "doc.md", "# x")
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+        assert _wait_terminal(port, job_id)["status"] == "succeeded"
+
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        assert headers["Content-Type"] == "application/zip"
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = archive.namelist()
+            assert sorted(names) == ["doc-2.md", "doc.md"]
+            assert archive.read("doc.md").decode("utf-8") == "# first"
+            assert archive.read("doc-2.md").decode("utf-8") == "# second"
+
+    def test_zip_double_suffix_conflict_renamed_stably(self, make_server) -> None:
+        server, port = make_server()
+        manager = server._manager
+
+        def _dupe_ai(_params: dict) -> tuple[tuple[Path, ...], str]:
+            job_dir = server.base_temp_dir
+            job_id = max((d.name for d in job_dir.iterdir() if d.is_dir()), key=lambda n: n)
+            a = job_dir / job_id / "x" / "doc.ai.md"
+            b = job_dir / job_id / "y" / "doc.ai.md"
+            a.parent.mkdir(parents=True, exist_ok=True)
+            b.parent.mkdir(parents=True, exist_ok=True)
+            a.write_text("# first", encoding="utf-8")
+            b.write_text("# second", encoding="utf-8")
+            return (a, b), "done"
+
+        manager.handlers["clean"] = _dupe_ai
+        status, _, data = _post_job(port, "clean", {}, "doc.md", "# x")
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+        assert _wait_terminal(port, job_id)["status"] == "succeeded"
+
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = archive.namelist()
+            assert sorted(names) == ["doc.ai-2.md", "doc.ai.md"]
+            assert archive.read("doc.ai.md").decode("utf-8") == "# first"
+            assert archive.read("doc.ai-2.md").decode("utf-8") == "# second"
+
+    def test_directory_output_collected_recursively(self, make_server) -> None:
+        server, port = make_server()
+        manager = server._manager
+
+        def _dir_output(_params: dict) -> tuple[tuple[Path, ...], str]:
+            job_dir = server.base_temp_dir
+            job_id = max((d.name for d in job_dir.iterdir() if d.is_dir()), key=lambda n: n)
+            out_dir = job_dir / job_id / "output"
+            (out_dir / "sub").mkdir(parents=True, exist_ok=True)
+            (out_dir / "one.md").write_text("# one", encoding="utf-8")
+            (out_dir / "sub" / "two.md").write_text("# two", encoding="utf-8")
+            return (out_dir,), "done"
+
+        manager.handlers["clean"] = _dir_output
+        status, _, data = _post_job(port, "clean", {}, "doc.md", "# x")
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+        assert _wait_terminal(port, job_id)["status"] == "succeeded"
+
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        assert headers["Content-Type"] == "application/zip"
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            assert sorted(archive.namelist()) == ["one.md", "two.md"]
+        assert str(server.base_temp_dir).encode() not in data
 
 
 # ---------------------------------------------------------------------------

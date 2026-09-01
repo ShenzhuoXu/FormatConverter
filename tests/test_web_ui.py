@@ -11,13 +11,11 @@ from __future__ import annotations
 
 import base64
 import http.client
-import io
 import json
 import re
 import shutil
 import subprocess
 import time
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -255,11 +253,9 @@ class TestEndToEndFlow:
 
         status, headers, data = _request(server.port, "GET", f"/api/jobs/{job_id}/download")
         assert status == 200
-        assert headers["Content-Type"] == "application/zip"
-        assert "attachment" in headers["Content-Disposition"]
+        assert headers["Content-Type"] != "application/zip"
+        assert 'filename="doc.md"' in headers["Content-Disposition"]
 
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            assert archive.namelist() == ["input/doc.md"]
-            extracted = archive.read("input/doc.md").decode("utf-8")
+        extracted = data.decode("utf-8")
         assert extracted == "# Doc\n\nAlpha.\n\nBeta.\n"
         assert extracted.count("Alpha.") == 1  # dedupe actually ran

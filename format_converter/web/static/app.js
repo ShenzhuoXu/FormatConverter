@@ -88,7 +88,7 @@
       var link = document.createElement("a");
       link.href = "/api/jobs/" + currentJobId + "/download";
       link.className = "download-btn";
-      link.textContent = "下载 ZIP";
+      link.textContent = "下载结果";
       downloadArea.appendChild(link);
     }
 
