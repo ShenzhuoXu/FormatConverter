@@ -26,9 +26,9 @@
 | health（正面 + 无 CORS） | `tests/test_web_server.py::TestHealthAndIndex` | ✅ 既有 |
 | 上传（clean 正面 e2e + 各类 400 负面） | `tests/test_web_server.py::TestSubmitAndDownload` / `TestValidation` / `TestFailures` | ✅ 既有 |
 | **413 超大请求体** | `tests/test_web_server.py::TestOversizedBody::test_oversized_request_body_413` | ✅ 新增通过 |
-| **convert / pipeline / ai-clean 三条全流程 e2e（上传→状态→下载 ZIP）** | `tests/test_web_server.py::TestAdditionalE2E` | ✅ 新增通过 |
+| **convert / pipeline / ai-clean 三条全流程 e2e（上传→状态→下载）** | `tests/test_web_server.py::TestAdditionalE2E` | ✅ 新增通过 |
 | 任务状态（正面 + 未知 job 404） | `tests/test_web_server.py` | ✅ 既有 |
-| 下载（正面 ZIP + 未知 404 + 未完成 409 + 失败 409） | `tests/test_web_server.py::TestSubmitAndDownload` / `TestFailures` | ✅ 既有 |
+| 下载（单文件直下载 / 多文件 ZIP 根级条目 + 未知 404 + 未完成 409 + 失败 409） | `tests/test_web_server.py::TestSubmitAndDownload` / `TestFailures` / `TestDownloadRules` | ✅ 既有 |
 | **下载：succeeded 但无输出文件 → 404** | `tests/test_web_server.py::TestAdditionalE2E::test_download_succeeded_but_no_output_files_404` | ✅ 新增通过 |
 | **上传安全（非法文件名 / 扩展名 / 空上传 / 非对象 params）** | `tests/test_web_server.py::TestValidation` | ✅ 既有 |
 | **布尔字符串形近值（`"false"`）不翻转行为** | `tests/test_web_server.py::TestAdditionalE2E::test_string_bool_lookalikes_do_not_flip_behavior` | ✅ 新增通过 |
@@ -69,7 +69,7 @@
    - 预期：弹出命令行服务窗口，显示「Using Python …」「Starting FormatConverter local service …」「服务已就绪：http://127.0.0.1:8765/」「按 Ctrl+C 停止」，并自动打开默认浏览器访问 `http://127.0.0.1:8765/`。
    - 验证：服务窗口保持前台运行；浏览器打开后出现「FormatConverter」四张功能卡片页面。
 2. **四张功能卡片流程**（在打开的页面中）
-   - ① PDF 转 Markdown：选一个 `.pdf`，提交后轮询到成功，点「下载 ZIP」解压得到 `.md`。
+   - ① PDF 转 Markdown：选一个 `.pdf`，提交后轮询到成功，点「下载结果」直接得到 `.md`。
    - ② Markdown 清理：选一个 `.md`（含重复段落），提交后下载，确认重复段落被去重且页面有 `.bak.md` 备份。
    - ③ 转换后清理（流水线）：选一个 `.pdf`，提交后下载，确认转换+清理一次完成。
    - ④ AI 校对：选一个 `.md`、填模型名；未设置 `ORCAROUTER_API_KEY` 时应看到缺 Key 的失败提示；设置后（`$env:ORCAROUTER_API_KEY="你的-key"`）成功并下载 `.ai.md`。
