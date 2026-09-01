@@ -59,8 +59,17 @@
 
       <div id="model-field" class="field" hidden>
         <label for="ai-model">模型名（必填）</label>
-        <input type="text" id="ai-model" name="model" required autocomplete="off"
+        <input type="text" id="ai-model" name="model" list="model-options" required autocomplete="off"
                placeholder="例如 deepseek-chat">
+        <datalist id="model-options"></datalist>
+        <p class="config-copy">连接测试会向 OrcaRouter 发起真实网络请求，可能产生费用。</p>
+        <div class="config-row">
+          <button type="button" class="config-btn" data-model-save>保存模型</button>
+          <button type="button" class="config-btn" data-model-delete>删除模型</button>
+          <button type="button" class="config-btn" data-connection-test>测试连接</button>
+        </div>
+        <p id="model-message" class="config-hint" role="status" aria-live="polite" hidden></p>
+        <p id="test-connection-status" class="config-hint" role="status" aria-live="polite" hidden></p>
       </div>
 
       <div id="drop-zone" class="drop-zone" role="button" tabindex="0"
@@ -83,7 +92,15 @@
 
       <p id="status" class="status" role="status" aria-live="polite"></p>
       <p id="error" class="error" role="alert"></p>
-      <div id="download-area" class="download-area" aria-live="polite"></div>
+    </section>
+
+    <section id="recent-jobs-section" class="card recent-jobs" aria-labelledby="recent-jobs-title">
+      <div class="recent-jobs-head">
+        <h2 id="recent-jobs-title">最近任务</h2>
+        <button type="button" id="refresh-jobs-btn" class="clear-btn">刷新</button>
+      </div>
+      <p id="job-list-empty" class="job-list-empty">暂无任务。</p>
+      <ul id="job-list" class="job-list" aria-label="最近任务列表"></ul>
     </section>
   </main>
 

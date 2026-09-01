@@ -464,6 +464,115 @@ body {
   filter: brightness(0.94);
 }
 
+/* -- recent jobs ---------------------------------------------------------------- */
+
+.recent-jobs {
+  margin-top: 16px;
+}
+
+.recent-jobs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.recent-jobs-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.job-list-empty {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 13px;
+}
+
+.job-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  flex-wrap: wrap;
+}
+
+.job-row:last-child {
+  border-bottom: none;
+}
+
+.job-type {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.job-status {
+  font-size: 12px;
+}
+
+.job-row.job-succeeded .job-status {
+  color: var(--color-success);
+  font-weight: 600;
+}
+
+.job-row.job-failed .job-status {
+  color: var(--color-error);
+  font-weight: 600;
+}
+
+.job-row.job-running .job-status {
+  color: var(--color-primary-dark);
+}
+
+.job-time {
+  margin-left: auto;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.job-download {
+  display: inline-block;
+  background: var(--color-success);
+  color: #FFFFFF;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.job-download:hover {
+  filter: brightness(0.94);
+}
+
+.job-msg {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--color-error);
+  word-break: break-word;
+}
+
+/* -- model memory / connection test feedback ------------------------------------ */
+
+.model-ok {
+  color: var(--color-success);
+}
+
+.model-error {
+  color: var(--color-error);
+  font-weight: 600;
+}
+
 /* -- status / error / download ------------------------------------------------ */
 
 .status {

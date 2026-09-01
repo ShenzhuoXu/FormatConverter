@@ -55,12 +55,21 @@ _TERMINAL_STATUSES = frozenset({JobStatus.succeeded, JobStatus.failed})
 
 @dataclass(frozen=True)
 class JobResult:
-    """Immutable snapshot of a job's current state."""
+    """Immutable snapshot of a job's current state.
+
+    ``job_type``, ``created_at`` and ``updated_at`` let a caller (such as the
+    web layer) surface recent jobs and their progress without leaking output
+    paths. ``created_at`` is the wall-clock ``time.time()`` of the first
+    (queued) snapshot; ``updated_at`` is rewritten on every state change.
+    """
 
     job_id: str
     status: JobStatus
     message: str
     output_paths: tuple[Path, ...]
+    job_type: str = ""
+    created_at: float = 0.0
+    updated_at: float = 0.0
 
 
 class UnknownJobTypeError(Exception):
@@ -273,7 +282,7 @@ class JobManager:
         params = dict(params)
 
         job_id = uuid.uuid4().hex
-        self._store(job_id, JobStatus.queued, "Job queued.", ())
+        self._store(job_id, JobStatus.queued, "Job queued.", (), job_type)
 
         thread = threading.Thread(
             target=self._run_job,
@@ -288,6 +297,35 @@ class JobManager:
         """Return the current result for ``job_id``, or None if unknown."""
         with self._cond:
             return self._results.get(job_id)
+
+    def list_recent(self, limit: int = 20) -> list[dict]:
+        """Return the most recently updated jobs as lightweight dicts.
+
+        Entries are ordered newest-updated first and contain ``job_id``,
+        ``job_type``, ``status``, ``message``, ``created_at`` and
+        ``updated_at``. ``output_paths`` are deliberately omitted so absolute
+        server paths can never reach a caller. Unknown/cleaned-up jobs simply
+        no longer appear; this only reflects what is in the current process.
+        """
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+            raise ValueError("limit must be a non-negative int")
+        with self._cond:
+            results = sorted(
+                self._results.values(),
+                key=lambda r: (r.updated_at, r.job_id),
+                reverse=True,
+            )
+        return [
+            {
+                "job_id": r.job_id,
+                "job_type": r.job_type,
+                "status": r.status.value,
+                "message": r.message,
+                "created_at": r.created_at,
+                "updated_at": r.updated_at,
+            }
+            for r in results[:limit]
+        ]
 
     def wait(self, job_id: str, timeout: float | None = None) -> JobResult | None:
         """Block until ``job_id`` reaches a terminal state.
@@ -330,13 +368,15 @@ class JobManager:
         # handler becomes a failed job instead of killing the thread.
         except BaseException:  # noqa: BLE001 - deliberate last-resort guard
             try:
-                self._store(job_id, JobStatus.failed, "Task failed unexpectedly.", ())
+                self._store(
+                    job_id, JobStatus.failed, "Task failed unexpectedly.", (), job_type
+                )
             except BaseException:  # noqa: BLE001 - never raise from a daemon thread
                 pass
 
     def _execute(self, job_id: str, job_type: str, params: dict) -> None:
         """Run a job's handler and store the terminal result."""
-        self._store(job_id, JobStatus.running, "Job running.", ())
+        self._store(job_id, JobStatus.running, "Job running.", (), job_type)
         status: JobStatus = JobStatus.failed
         message = "Task failed unexpectedly."
         output_paths: tuple[Path, ...] = ()
@@ -357,7 +397,7 @@ class JobManager:
             except Exception:  # noqa: BLE001
                 message = f"Task failed: {type(exc).__name__}"
             output_paths = ()
-        self._store(job_id, status, message, output_paths)
+        self._store(job_id, status, message, output_paths, job_type)
 
     def _store(
         self,
@@ -365,9 +405,22 @@ class JobManager:
         status: JobStatus,
         message: str,
         output_paths: tuple[Path, ...],
+        job_type: str = "",
     ) -> None:
-        """Write a result snapshot under the lock and wake any waiters."""
-        result = JobResult(job_id, status, message, output_paths)
+        """Write a result snapshot under the lock and wake any waiters.
+
+        ``created_at`` is captured on the first (queued) snapshot and kept
+        stable on every later transition; ``updated_at`` is rewritten to the
+        current wall-clock time on every snapshot so callers can see progress.
+        """
         with self._cond:
+            prev = self._results.get(job_id)
+            created_at = prev.created_at if prev is not None else 0.0
+            now = time.time()
+            if not created_at:
+                created_at = now
+            result = JobResult(
+                job_id, status, message, output_paths, job_type, created_at, now
+            )
             self._results[job_id] = result
             self._cond.notify_all()

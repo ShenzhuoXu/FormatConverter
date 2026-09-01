@@ -59,6 +59,8 @@ python -m format_converter.web_server
 - **③ 转换后清理流水线**：上传一个或多个 `.pdf` 文件，一次完成「转换 + 清理」，下载结果。单个输出直接下载该文件，多个输出打包为 ZIP。
 - **④ AI 校对**：上传一个或多个 `.md` 文件并填写模型名，下载校对结果。单个输出直接下载该文件，多个输出打包为 ZIP。页面还提供「OrcaRouter API 配置」区域，可查看 Key 状态/来源、把 Key 保存到本机 `.env`、清除本地 Key 或重新检测。
 
+> 任务提交后在下方「最近任务」区域查看进度（排队 / 处理中 / 成功 / 失败），切换任务类型或刷新页面都不会丢失当前服务进程内的任务，成功任务可随时点「下载结果」。
+
 > **停止方式**：在命令行服务窗口按 **Ctrl+C**，窗口会打印「收到 Ctrl+C，正在停止服务...」后退出，下次可重新双击启动。**保持该窗口前台运行**：它就是服务进程本体，关闭或 Ctrl+C 即停止服务。
 
 ## CLI 用法
@@ -164,6 +166,7 @@ ORCAROUTER_API_KEY=你的-key
 ```
 
   `.env` 是**明文配置文件**（不是加密保险箱），已被 `.gitignore` 忽略、不会被提交，只适用于本机个人使用场景。参考模板见 `.env.example`（仅占位值）。
+- **模型名本地记忆与连接测试**：Web UI「AI 校对」里填写的模型名可点「保存模型」存入项目根目录 gitignored 的 `.formatconverter-models.json`（**只存模型名、绝不存 API Key**），提交 AI 任务时也会自动记住，下次打开可直接下拉选择。「测试连接」会用当前 Key 与模型向 OrcaRouter 发起一次极小真实请求（可能产生费用），用来提前确认 Key 与模型可用。
 - **`.env` 与网页的隐私边界**：页面只把 Key 通过本机回环请求保存到项目根目录 `.env`，**不会**写入浏览器存储（无 Cookie / localStorage 等）；但**不宣称 Key 不会联网**——执行 AI 校对时，Python 后端会用该 Key 真实调用 OrcaRouter。写入/删除接口需验证服务启动时生成的仅内存会话令牌与回环 Host/Origin，防止其它网页对 localhost 发起未授权操作。
 - **缺失时的表现**：环境变量与 `.env` 均未设置（或为空白）时，`ai-clean` 会在任何网络请求之前报错并退出。命令行错误消息为 `error: Missing API key for provider 'orcarouter'. Set the ORCAROUTER_API_KEY environment variable and try again.`（返回码 1）；Web UI 的「AI 校对」卡片会显示对应的失败提示。
 - 在 [OrcaRouter](https://www.orcarouter.ai/) 注册并获取 API Key（维护者可把该链接替换为自己的注册链接）。

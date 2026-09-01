@@ -210,7 +210,7 @@ class TestHealthAndIndex:
     def test_unknown_route_404(self, make_server) -> None:
         server, port = make_server()
         assert _request(port, "GET", "/nope")[0] == 404
-        assert _request(port, "GET", "/api/jobs")[0] == 404
+        # ``GET /api/jobs`` is now a valid recent-jobs endpoint (Step 4.1).
         assert _request(port, "GET", "/api/jobs/abc/extra/parts")[0] == 404
         assert _request(port, "POST", "/health")[0] == 404
         assert _request(port, "POST", "/api/jobs/unknown-id")[0] == 404
@@ -1070,6 +1070,49 @@ def _delete_key(port: int, token: str | None = None, *, origin: str | None = Non
     return _request(port, "DELETE", "/api/ai/key", headers=headers)
 
 
+def _save_model(port: int, token: str | None, model: str, *, origin: str | None = None,
+                host: str | None = None) -> tuple[int, dict[str, str], bytes]:
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["X-FC-Session-Token"] = token
+    if origin is None:
+        origin = f"http://127.0.0.1:{port}"
+    headers["Origin"] = origin
+    if host is not None:
+        headers["Host"] = host
+    body = json.dumps({"model": model}).encode("utf-8")
+    return _request(port, "POST", "/api/ai/models", body=body, headers=headers)
+
+
+def _delete_model(port: int, token: str | None, model: str, *, origin: str | None = None,
+                  host: str | None = None) -> tuple[int, dict[str, str], bytes]:
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["X-FC-Session-Token"] = token
+    if origin is None:
+        origin = f"http://127.0.0.1:{port}"
+    headers["Origin"] = origin
+    if host is not None:
+        headers["Host"] = host
+    body = json.dumps({"model": model}).encode("utf-8")
+    return _request(port, "DELETE", "/api/ai/models", body=body, headers=headers)
+
+
+def _post_connection_test(port: int, token: str | None, provider: str, model: str,
+                          *, origin: str | None = None,
+                          host: str | None = None) -> tuple[int, dict[str, str], bytes]:
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["X-FC-Session-Token"] = token
+    if origin is None:
+        origin = f"http://127.0.0.1:{port}"
+    headers["Origin"] = origin
+    if host is not None:
+        headers["Host"] = host
+    body = json.dumps({"provider": provider, "model": model}).encode("utf-8")
+    return _request(port, "POST", "/api/ai/connection-test", body=body, headers=headers)
+
+
 class TestKeyConfigEndpoints:
     def test_key_status_none(self, make_server, monkeypatch) -> None:
         monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
@@ -1305,3 +1348,253 @@ class TestKeyConfigEndpoints:
         match = re.search(rb'name="fc-session-token"\s+content="([^"]+)"', data)
         assert match is not None
         assert match.group(1).decode("ascii") == server._session_token
+
+
+# ---------------------------------------------------------------------------
+# recent jobs listing (Step 4.1: recover progress after reload / mode switch)
+# ---------------------------------------------------------------------------
+
+
+class TestRecentJobs:
+    def test_get_jobs_lists_recent_jobs_without_leaks(self, make_server) -> None:
+        server, port = make_server()
+        content = "# Doc\n\nAlpha.\n\nAlpha.\n\nBeta.\n"
+        status, _, data = _post_job(port, "clean", {"dedupe": True}, "doc.md", content)
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+        assert _wait_terminal(port, job_id)["status"] == "succeeded"
+
+        status, headers, data = _request(port, "GET", "/api/jobs")
+        assert status == 200
+        assert "Access-Control-Allow-Origin" not in headers
+        payload = json.loads(data.decode("utf-8"))
+        assert isinstance(payload.get("jobs"), list)
+        entry = next(j for j in payload["jobs"] if j["job_id"] == job_id)
+        assert entry["job_type"] == "clean"
+        assert entry["status"] == "succeeded"
+        assert isinstance(entry["created_at"], float) and entry["created_at"] > 0
+        assert isinstance(entry["updated_at"], float) and entry["updated_at"] > 0
+        assert "output_paths" not in entry
+        body = data.decode("utf-8")
+        assert "output_paths" not in body
+        assert str(server.base_temp_dir) not in body  # no absolute temp path
+        assert "sk-" not in body
+
+    def test_get_jobs_includes_running_job(self, make_server) -> None:
+        server, port = make_server()
+        manager = server._manager
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking(_params: dict) -> tuple[tuple[Path, ...], str]:
+            entered.set()
+            assert release.wait(5), "release event not set"
+            return (Path("x.md"),), "blocked done"
+
+        manager.handlers["clean"] = _blocking
+        job_id = manager.submit("clean", {"file": "doc.md"})
+        assert entered.wait(5), "handler never started"
+
+        status, _, data = _request(port, "GET", "/api/jobs")
+        assert status == 200
+        jobs = json.loads(data.decode("utf-8"))["jobs"]
+        running = next((j for j in jobs if j["job_id"] == job_id), None)
+        assert running is not None
+        assert running["status"] == "running"
+        assert running["job_type"] == "clean"
+
+        release.set()
+        manager.wait(job_id, timeout=5)
+
+    def test_job_status_response_has_metadata(self, make_server) -> None:
+        server, port = make_server()
+        content = "# Doc\n\nAlpha.\n\nAlpha.\n\nBeta.\n"
+        status, _, data = _post_job(port, "clean", {"dedupe": True}, "doc.md", content)
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+        assert final["job_type"] == "clean"
+        assert isinstance(final["created_at"], float)
+        assert isinstance(final["updated_at"], float)
+        assert "output_paths" not in final
+
+
+# ---------------------------------------------------------------------------
+# local model-name memory (Step 4.1)
+# ---------------------------------------------------------------------------
+
+
+class TestModelStore:
+    def test_get_models_empty_by_default(self, make_server) -> None:
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        status, _, data = _request(port, "GET", "/api/ai/models")
+        assert status == 200
+        assert json.loads(data.decode("utf-8")) == {"models": []}
+
+    def test_save_requires_auth(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        model = "deepseek/deepseek-v4-flash-free"
+        # missing token
+        status, _, _ = _save_model(port, None, model)
+        assert status == 403
+        # wrong token
+        assert _save_model(port, "wrong-token", model)[0] == 403
+        # missing Origin
+        headers = {"Content-Type": "application/json", "X-FC-Session-Token": "x" * 32}
+        body = json.dumps({"model": model}).encode("utf-8")
+        status, _, _ = _request(port, "POST", "/api/ai/models", body=body, headers=headers)
+        assert status == 403
+        # non-loopback Origin
+        token = _get_session_token(port)
+        assert _save_model(port, token, model, origin="http://evil.example/")[0] == 403
+        # non-loopback Host
+        assert _save_model(port, token, model, host="evil.example")[0] == 403
+
+    def test_save_list_delete_roundtrip(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        model = "deepseek/deepseek-v4-flash-free"
+
+        status, _, data = _save_model(port, token, model)
+        assert status == 200
+        saved = json.loads(data.decode("utf-8"))
+        assert saved["models"] == [model]
+        assert b"sk-" not in data
+
+        status, _, data = _request(port, "GET", "/api/ai/models")
+        assert status == 200
+        assert json.loads(data.decode("utf-8")) == {"models": [model]}
+
+        status, _, data = _delete_model(port, token, model)
+        assert status == 200
+        deleted = json.loads(data.decode("utf-8"))
+        assert deleted["models"] == []
+        assert b"sk-" not in data
+
+    def test_save_is_idempotent_and_case_sensitive(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        model = "deepseek/deepseek-v4-flash-free"
+        _save_model(port, token, model)
+        _save_model(port, token, model)  # identical -> no duplicate
+        status, _, data = _request(port, "GET", "/api/ai/models")
+        assert json.loads(data.decode("utf-8")) == {"models": [model]}
+        # case differs -> a separate entry
+        _save_model(port, token, model.upper())
+        status, _, data = _request(port, "GET", "/api/ai/models")
+        assert json.loads(data.decode("utf-8")) == {"models": [model, model.upper()]}
+
+    def test_save_model_validation_400(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        assert _save_model(port, token, "   ")[0] == 400  # whitespace-only
+        assert _save_model(port, token, "x" * 201)[0] == 400  # too long
+        assert _save_model(port, token, "a\nb")[0] == 400  # embedded LF
+        assert _save_model(port, token, "a\rb")[0] == 400  # embedded CR
+
+    def test_delete_requires_auth(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        model = "deepseek/deepseek-v4-flash-free"
+        assert _delete_model(port, None, model)[0] == 403
+        assert _delete_model(port, "wrong-token", model)[0] == 403
+        assert _delete_model(port, "wrong-token", model, origin="http://evil.example/")[0] == 403
+
+
+# ---------------------------------------------------------------------------
+# AI connection test (Step 4.1)
+# ---------------------------------------------------------------------------
+
+
+class TestConnectionTest:
+    def test_connection_test_requires_auth(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        assert _post_connection_test(port, None, "orcarouter", "m1")[0] == 403
+        assert _post_connection_test(port, "wrong-token", "orcarouter", "m1")[0] == 403
+        assert _post_connection_test(
+            port, "wrong-token", "orcarouter", "m1", origin="http://evil.example/"
+        )[0] == 403
+
+    def test_connection_test_unsupported_provider_400(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        assert _post_connection_test(port, token, "bogus", "m1")[0] == 400
+
+    def test_connection_test_missing_key_ok_false_no_leak(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        status, _, data = _post_connection_test(port, token, "orcarouter", "m1")
+        assert status == 200
+        payload = json.loads(data.decode("utf-8"))
+        assert payload == {"ok": False, "error": "未配置 API Key。"}
+        assert b"sk-" not in data
+
+    def test_connection_test_success_with_fake_client(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        calls: list[dict] = []
+
+        class FakeClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                calls.append({"system": system, "user": user, "model": model})
+                return "OK"
+
+        monkeypatch.setattr("format_converter.web_server.get_api_key", lambda _cfg: "sk-test-fake-key")
+        monkeypatch.setattr("format_converter.web_server.OpenAICompatClient", FakeClient)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+
+        status, _, data = _post_connection_test(port, token, "orcarouter", "my-model")
+        assert status == 200
+        assert json.loads(data.decode("utf-8")) == {"ok": True}
+        assert calls and calls[0]["model"] == "my-model"
+        assert calls[0]["user"] == "OK"
+        assert b"sk-" not in data
+
+    def test_connection_test_maps_client_errors(self, make_server, monkeypatch) -> None:
+        from format_converter.llm_client import (
+            AuthenticationError,
+            ConnectionFailedError,
+            EmptyResponseError,
+            PermissionDeniedError,
+            RateLimitError,
+            ServerError,
+        )
+
+        cases = [
+            (AuthenticationError, "认证失败"),
+            (PermissionDeniedError, "无权限"),
+            (ConnectionFailedError, "无法连接"),
+            (RateLimitError, "请求过于频繁"),
+            (ServerError, "服务器错误"),
+            (EmptyResponseError, "空响应"),
+        ]
+        monkeypatch.setattr("format_converter.web_server.get_api_key", lambda _cfg: "sk-test-fake-key")
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+
+        for exc_type, expected in cases:
+            class BoomClient:
+                def __init__(self, *args: object, **kwargs: object) -> None:
+                    pass
+
+                def complete(self, **kwargs: object) -> str:
+                    raise exc_type("boom")
+
+            monkeypatch.setattr("format_converter.web_server.OpenAICompatClient", BoomClient)
+            status, _, data = _post_connection_test(port, token, "orcarouter", "m1")
+            assert status == 200
+            payload = json.loads(data.decode("utf-8"))
+            assert payload["ok"] is False
+            assert expected in payload["error"]
+            assert b"sk-" not in data

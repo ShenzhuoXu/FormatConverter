@@ -306,6 +306,53 @@ class TestPageSourceCompliance:
 
 
 # ---------------------------------------------------------------------------
+# Step 4.1: recent-jobs recovery, model memory, connection test (static)
+# ---------------------------------------------------------------------------
+
+
+class TestStep41Frontend:
+    def test_app_js_loads_recent_jobs_on_start(self) -> None:
+        # On page load the UI must call GET /api/jobs and read the returned
+        # "jobs" array to recover jobs still in the current server process.
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "/api/jobs" in js
+        assert "data.jobs" in js
+
+    def test_page_has_recent_jobs_area(self) -> None:
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        assert 'id="job-list"' in html
+        assert "最近任务" in html
+
+    def test_app_js_tracks_jobs_without_a_single_current_id(self) -> None:
+        # A single "currentJobId" that setMode() nulls out is exactly what
+        # cancelled polling on mode switch. The redesigned controller must
+        # track jobs independently of the active mode.
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "currentJobId" not in js
+        assert "jobs" in js
+        assert "pollJob" in js
+
+    def test_app_js_has_model_memory_and_connection_test_hooks(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        assert "/api/ai/models" in js
+        assert "/api/ai/connection-test" in js
+        assert 'data-model-save' in html
+        assert 'data-model-delete' in html
+        assert 'data-connection-test' in html
+        assert "保存模型" in html
+        assert "删除模型" in html
+        assert "测试连接" in html
+
+    def test_connection_test_warns_about_real_request(self) -> None:
+        # The UI must say plainly that the test fires a real network request
+        # which may incur cost, before the user clicks it.
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        assert "真实网络请求" in html
+        assert "费用" in html
+
+
+# ---------------------------------------------------------------------------
 # JS syntax check (Node available on this machine)
 # ---------------------------------------------------------------------------
 

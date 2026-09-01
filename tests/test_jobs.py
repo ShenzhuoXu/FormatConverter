@@ -8,6 +8,7 @@ so the PDF path is faked while still exercising the real handler logic).
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -257,6 +258,78 @@ class TestSanitization:
         assert "sk-secret-xyz" not in result.message
         assert "***" in result.message
         assert "boom" in result.message
+
+
+class TestListRecent:
+    def test_list_recent_includes_metadata(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("format_converter.jobs.convert_pdf_file", _fake_convert_file)
+        pdf = _write_pdf(tmp_path / "doc.pdf")
+        out_dir = tmp_path / "out"
+
+        manager = JobManager()
+        job_id = manager.submit("convert", {"file": pdf, "output_dir": out_dir})
+        manager.wait(job_id, timeout=10)
+
+        recent = manager.list_recent()
+        assert isinstance(recent, list)
+        assert any(j["job_id"] == job_id for j in recent)
+        entry = next(j for j in recent if j["job_id"] == job_id)
+        assert entry["job_type"] == "convert"
+        assert entry["status"] == "succeeded"
+        assert isinstance(entry["created_at"], float) and entry["created_at"] > 0
+        assert isinstance(entry["updated_at"], float) and entry["updated_at"] > 0
+        assert entry["updated_at"] >= entry["created_at"]
+        assert isinstance(entry["message"], str) and entry["message"]
+        # list_recent must never leak output paths to the caller.
+        assert "output_paths" not in entry
+        assert "output_paths" not in str(entry)
+
+    def test_list_recent_updated_at_changes_on_transition(self) -> None:
+        manager = JobManager()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking(_params: dict) -> tuple[tuple[Path, ...], str]:
+            entered.set()
+            assert release.wait(5), "release event not set"
+            return (Path("out.md"),), "blocked done"
+
+        manager.handlers["blocking"] = _blocking
+        job_id = manager.submit("blocking", {})
+        assert entered.wait(5), "handler never started"
+        assert manager.get(job_id).status is JobStatus.running
+
+        running_updated = next(
+            j for j in manager.list_recent() if j["job_id"] == job_id
+        )["updated_at"]
+
+        time.sleep(0.02)
+        release.set()
+        final = manager.wait(job_id, timeout=5)
+        assert final is not None and final.status is JobStatus.succeeded
+
+        final_updated = next(
+            j for j in manager.list_recent() if j["job_id"] == job_id
+        )["updated_at"]
+        # A terminal transition rewrites the snapshot, so updated_at moves on.
+        assert final_updated > running_updated
+
+    def test_list_recent_honors_limit_and_order(self) -> None:
+        manager = JobManager()
+        for i in range(3):
+            manager.handlers[f"h{i}"] = lambda _params: ((Path("x.md"),), "done")
+            manager.submit(f"h{i}", {})
+            manager.wait(f"h{i}", timeout=5)
+
+        recent = manager.list_recent(limit=2)
+        assert len(recent) == 2
+        # Newest-updated first.
+        assert recent[0]["updated_at"] >= recent[1]["updated_at"]
+
+    def test_list_recent_negative_limit_rejected(self) -> None:
+        manager = JobManager()
+        with pytest.raises(ValueError):
+            manager.list_recent(limit=-1)
 
 
 class TestThreading:

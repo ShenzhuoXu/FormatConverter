@@ -6,6 +6,9 @@
  *  - API keys may be saved only to the project-root .env file; the key is
  *    never stored in the browser, never logged, and the password input is
  *    cleared immediately after any key request completes.
+ *  - Jobs are tracked per-id and survive mode switches and page reloads (the
+ *    server keeps recent jobs for the life of the process). Switching modes
+ *    never cancels an in-flight poll loop.
  */
 (function () {
   "use strict";
@@ -46,14 +49,27 @@
     }
   };
 
-  // All UI state lives in memory only; a page refresh resets everything.
+  var JOB_STATUS_LABELS = {
+    queued: "排队",
+    running: "处理中",
+    succeeded: "成功",
+    failed: "失败"
+  };
+
+  // All UI state lives in memory only; a page refresh resets the file
+  // selection, but the job list is recovered from the server via GET /api/jobs.
   var appState = {
     mode: "convert",
     files: [], // { name, size, file, valid, reason }
-    currentJobId: null
+    jobs: []   // { job_id, job_type, status, message, created_at, updated_at }
   };
 
   var busy = false;
+  // job_id -> true while that job's poll loop is running. Never cleared on a
+  // mode switch, so an in-flight job keeps updating after the user moves on.
+  var polling = {};
+  // The job whose progress the main status line reflects (null after reload).
+  var feedbackJobId = null;
 
   // DOM element handles, bound once the document is ready.
   var els = {};
@@ -100,6 +116,8 @@
   function isAccepted(name) {
     return name.toLowerCase().endsWith(currentMeta().ext);
   }
+
+  // -- file selection / validation -----------------------------------------
 
   function validateFiles(files) {
     // Returns the first problem as a message, or "" when every file is valid
@@ -294,12 +312,136 @@
     els.startBtn.textContent = busy ? "处理中…" : "开始处理";
   }
 
+  // -- recent jobs -----------------------------------------------------------
+
+  function upsertJob(data) {
+    if (!data || !data.job_id) {
+      return;
+    }
+    var found = false;
+    appState.jobs = appState.jobs.map(function (job) {
+      if (job.job_id === data.job_id) {
+        found = true;
+        return {
+          job_id: data.job_id,
+          job_type: data.job_type || job.job_type,
+          status: data.status || job.status,
+          message: data.message != null ? data.message : job.message,
+          created_at: typeof data.created_at === "number" ? data.created_at : job.created_at,
+          updated_at: typeof data.updated_at === "number" ? data.updated_at : job.updated_at
+        };
+      }
+      return job;
+    });
+    if (!found) {
+      appState.jobs.push({
+        job_id: data.job_id,
+        job_type: data.job_type || appState.mode,
+        status: data.status || "queued",
+        message: data.message || "",
+        created_at: typeof data.created_at === "number" ? data.created_at : 0,
+        updated_at: typeof data.updated_at === "number" ? data.updated_at : 0
+      });
+    }
+    renderJobs();
+  }
+
+  function formatJobTime(ts) {
+    if (!ts) {
+      return "";
+    }
+    var d = new Date(ts * 1000);
+    function two(n) {
+      return (n < 10 ? "0" : "") + n;
+    }
+    return two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds());
+  }
+
+  function renderJobs() {
+    var list = els.jobList;
+    list.textContent = "";
+    var emptyEl = els.jobListEmpty;
+    if (!appState.jobs.length) {
+      emptyEl.hidden = false;
+      return;
+    }
+    emptyEl.hidden = true;
+
+    var sorted = appState.jobs.slice().sort(function (a, b) {
+      return (b.updated_at || 0) - (a.updated_at || 0);
+    });
+
+    sorted.forEach(function (job) {
+      var meta = MODE_META[job.job_type];
+      var li = document.createElement("li");
+      li.className = "job-row job-" + (job.status || "queued");
+      li.setAttribute("data-job-id", job.job_id);
+
+      var typeEl = document.createElement("span");
+      typeEl.className = "job-type";
+      typeEl.textContent = meta ? meta.title : job.job_type;
+
+      var statusEl = document.createElement("span");
+      statusEl.className = "job-status";
+      statusEl.textContent = JOB_STATUS_LABELS[job.status] || job.status;
+
+      var timeEl = document.createElement("span");
+      timeEl.className = "job-time";
+      timeEl.textContent = formatJobTime(job.updated_at);
+
+      li.appendChild(typeEl);
+      li.appendChild(statusEl);
+      li.appendChild(timeEl);
+
+      if (job.status === "succeeded") {
+        var link = document.createElement("a");
+        link.className = "job-download";
+        link.href = "/api/jobs/" + job.job_id + "/download";
+        link.textContent = "下载结果";
+        li.appendChild(link);
+      }
+
+      if (job.status === "failed") {
+        var msg = document.createElement("span");
+        msg.className = "job-msg";
+        msg.textContent = job.message || "任务失败。";
+        li.appendChild(msg);
+      }
+
+      list.appendChild(li);
+    });
+  }
+
+  function loadRecentJobs() {
+    fetch("/api/jobs")
+      .then(function (resp) {
+        return readJson(resp);
+      })
+      .then(function (data) {
+        if (!data || !Array.isArray(data.jobs)) {
+          return;
+        }
+        data.jobs.forEach(upsertJob);
+        data.jobs.forEach(function (job) {
+          if (job.status === "queued" || job.status === "running") {
+            pollJob(job.job_id);
+          }
+        });
+      })
+      .catch(function () {
+        // Server not reachable yet; leave the recent-jobs area empty.
+      });
+  }
+
+  // -- modes / panel ---------------------------------------------------------
+
   function setMode(mode) {
     appState.mode = mode;
-    appState.currentJobId = null;
+    feedbackJobId = null;
     setStatus("");
     setError("");
-    clearDownload();
+    // Note: appState.jobs is deliberately NOT cleared here. Recent jobs stay
+    // visible across mode switches; only the transient status line resets.
 
     var meta = MODE_META[mode];
     els.panel.setAttribute("data-job-type", mode);
@@ -328,6 +470,7 @@
       setError("");
     }
     renderFileList();
+    renderJobs();
   }
 
   function initPanel() {
@@ -363,13 +506,14 @@
     });
     els.clearBtn.addEventListener("click", clearFiles);
     els.startBtn.addEventListener("click", startJob);
+    els.refreshJobsBtn.addEventListener("click", loadRecentJobs);
   }
+
+  // -- submit / polling ------------------------------------------------------
 
   function startJob() {
     setError("");
     setStatus("");
-    clearDownload();
-    appState.currentJobId = null;
 
     var files = appState.files.map(function (item) {
       return item.file;
@@ -404,6 +548,7 @@
         if (appState.mode === "ai-clean") {
           params.provider = "orcarouter";
           params.model = (els.modelInput.value || "").trim();
+          rememberModel(params.model);
         }
         var payload = {
           job_type: appState.mode,
@@ -436,19 +581,6 @@
     els.error.textContent = text;
   }
 
-  function clearDownload() {
-    els.downloadArea.textContent = "";
-  }
-
-  function showDownloadLink() {
-    clearDownload();
-    var link = document.createElement("a");
-    link.href = "/api/jobs/" + appState.currentJobId + "/download";
-    link.className = "download-btn";
-    link.textContent = "下载结果";
-    els.downloadArea.appendChild(link);
-  }
-
   function postJob(payload) {
     fetch("/api/jobs", {
       method: "POST",
@@ -466,12 +598,21 @@
         });
       })
       .then(function (data) {
-        appState.currentJobId = data.job_id;
+        var now = Date.now() / 1000;
+        upsertJob({
+          job_id: data.job_id,
+          job_type: appState.mode,
+          status: data.status || "queued",
+          message: "任务已提交。",
+          created_at: now,
+          updated_at: now
+        });
+        feedbackJobId = data.job_id;
         var validCount = appState.files.filter(function (item) {
           return item.valid;
         }).length;
         setStatus("正在处理 " + validCount + " 个文件…", "running");
-        pollUntilDone(data.job_id);
+        pollJob(data.job_id);
       })
       .catch(function (err) {
         setBusy(false);
@@ -480,11 +621,14 @@
       });
   }
 
-  function pollUntilDone(jobId) {
-    var done = false;
+  function pollJob(jobId) {
+    if (polling[jobId]) {
+      return;
+    }
+    polling[jobId] = true;
 
     function tick() {
-      if (done || appState.currentJobId !== jobId) {
+      if (!polling[jobId]) {
         return;
       }
       fetch("/api/jobs/" + jobId)
@@ -499,46 +643,217 @@
           });
         })
         .then(function (data) {
-          if (appState.currentJobId !== jobId) {
+          if (!polling[jobId]) {
             return;
           }
+          upsertJob(data);
           var status = data.status;
           if (status === "queued" || status === "running") {
-            setStatus("正在处理…", "running");
             setTimeout(tick, POLL_INTERVAL_MS);
             return;
           }
-          if (status === "succeeded") {
-            done = true;
-            setBusy(false);
-            setStatus("成功", "success");
-            showDownloadLink();
-            return;
+          // Terminal state: stop polling this job.
+          delete polling[jobId];
+          if (jobId === feedbackJobId) {
+            if (status === "succeeded") {
+              setBusy(false);
+              setStatus("任务完成", "success");
+            } else if (status === "failed") {
+              setBusy(false);
+              setStatus("任务失败", "failed");
+              setError("任务失败：" + (data.message || "无详细消息。"));
+            }
           }
-          if (status === "failed") {
-            done = true;
-            setBusy(false);
-            var message = data && data.message ? data.message : "任务失败，无详细消息。";
-            setStatus("失败", "failed");
-            setError("任务失败：" + message);
-            return;
-          }
-          // Unknown status value: keep polling, keep the user informed.
-          setStatus("正在处理…", "running");
-          setTimeout(tick, POLL_INTERVAL_MS);
         })
-        .catch(function (err) {
-          if (appState.currentJobId !== jobId) {
-            return;
+        .catch(function () {
+          // The job may have been cleaned up or the server restarted; stop
+          // polling rather than spin forever on 404s.
+          delete polling[jobId];
+          if (jobId === feedbackJobId) {
+            setBusy(false);
           }
-          done = true;
-          setBusy(false);
-          setStatus("");
-          setError("查询失败：" + err.message);
         });
     }
 
     setTimeout(tick, 0);
+  }
+
+  // -- model memory + connection test (ai-clean mode only) -------------------
+
+  function loadModels() {
+    fetch("/api/ai/models")
+      .then(function (resp) {
+        return readJson(resp);
+      })
+      .then(function (data) {
+        if (data && Array.isArray(data.models)) {
+          renderModelOptions(data.models);
+        }
+      })
+      .catch(function () {});
+  }
+
+  function renderModelOptions(models) {
+    els.modelOptions.textContent = "";
+    models.forEach(function (model) {
+      var option = document.createElement("option");
+      option.value = model;
+      els.modelOptions.appendChild(option);
+    });
+  }
+
+  function setModelMessage(text, isError) {
+    els.modelMessage.textContent = text;
+    els.modelMessage.hidden = !text;
+    els.modelMessage.className = "config-hint" + (isError ? " model-error" : " model-ok");
+  }
+
+  function setTestStatus(text, isError) {
+    els.testConnectionStatus.textContent = text;
+    els.testConnectionStatus.hidden = !text;
+    els.testConnectionStatus.className = "config-hint" + (isError ? " model-error" : " model-ok");
+  }
+
+  function authHeaders() {
+    var headers = { "Content-Type": "application/json" };
+    if (sessionToken) {
+      headers["X-FC-Session-Token"] = sessionToken;
+    }
+    return headers;
+  }
+
+  function saveModel() {
+    var model = (els.modelInput.value || "").trim();
+    if (!model) {
+      setModelMessage("请先填写模型名。", true);
+      return;
+    }
+    setModelMessage("正在保存…", false);
+    fetch("/api/ai/models", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ model: model })
+    })
+      .then(function (resp) {
+        return readJson(resp).then(function (data) {
+          if (!resp.ok) {
+            if (resp.status === 403) {
+              throw new Error("会话已失效，请刷新页面后重试。");
+            }
+            throw new Error(
+              data && data.error ? data.error : "保存模型失败（HTTP " + resp.status + "）。"
+            );
+          }
+          return data;
+        });
+      })
+      .then(function (data) {
+        renderModelOptions(data.models);
+        setModelMessage("已保存模型。", false);
+      })
+      .catch(function (err) {
+        setModelMessage(err.message, true);
+      });
+  }
+
+  function deleteModel() {
+    var model = (els.modelInput.value || "").trim();
+    if (!model) {
+      setModelMessage("请先填写要删除的模型名。", true);
+      return;
+    }
+    setModelMessage("正在删除…", false);
+    fetch("/api/ai/models", {
+      method: "DELETE",
+      headers: authHeaders(),
+      body: JSON.stringify({ model: model })
+    })
+      .then(function (resp) {
+        return readJson(resp).then(function (data) {
+          if (!resp.ok) {
+            if (resp.status === 403) {
+              throw new Error("会话已失效，请刷新页面后重试。");
+            }
+            throw new Error(
+              data && data.error ? data.error : "删除模型失败（HTTP " + resp.status + "）。"
+            );
+          }
+          return data;
+        });
+      })
+      .then(function (data) {
+        renderModelOptions(data.models);
+        setModelMessage("已删除模型。", false);
+      })
+      .catch(function (err) {
+        setModelMessage(err.message, true);
+      });
+  }
+
+  function testConnection() {
+    var model = (els.modelInput.value || "").trim();
+    if (!model) {
+      setModelMessage("请先填写模型名。", true);
+      return;
+    }
+    setTestStatus("正在测试连接…（将向 OrcaRouter 发起真实网络请求）", false);
+    fetch("/api/ai/connection-test", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ provider: "orcarouter", model: model })
+    })
+      .then(function (resp) {
+        return readJson(resp).then(function (data) {
+          if (!resp.ok) {
+            if (resp.status === 403) {
+              throw new Error("会话已失效，请刷新页面后重试。");
+            }
+            throw new Error(
+              data && data.error ? data.error : "测试失败（HTTP " + resp.status + "）。"
+            );
+          }
+          return data;
+        });
+      })
+      .then(function (data) {
+        if (data && data.ok) {
+          setTestStatus("连接正常", false);
+        } else {
+          setTestStatus((data && data.error) ? data.error : "连接测试失败。", true);
+        }
+      })
+      .catch(function (err) {
+        setTestStatus(err.message, true);
+      });
+  }
+
+  function rememberModel(model) {
+    // Fire-and-forget: submitting an AI job remembers the model name so it is
+    // offered again next time. Never touches the API key.
+    if (!model) {
+      return;
+    }
+    fetch("/api/ai/models", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ model: model })
+    })
+      .then(function (resp) {
+        return readJson(resp);
+      })
+      .then(function (data) {
+        if (data && Array.isArray(data.models)) {
+          renderModelOptions(data.models);
+        }
+      })
+      .catch(function () {});
+  }
+
+  function initModelControls() {
+    els.modelSave.addEventListener("click", saveModel);
+    els.modelDelete.addEventListener("click", deleteModel);
+    els.testConnection.addEventListener("click", testConnection);
+    loadModels();
   }
 
   // -----------------------------------------------------------------------
@@ -710,10 +1025,18 @@
     els.startBtn = document.getElementById("start-btn");
     els.status = document.getElementById("status");
     els.error = document.getElementById("error");
-    els.downloadArea = document.getElementById("download-area");
     els.aiKeySection = document.querySelector("[data-key-section]");
     els.modelField = document.getElementById("model-field");
     els.modelInput = document.getElementById("ai-model");
+    els.modelOptions = document.getElementById("model-options");
+    els.modelSave = document.querySelector("[data-model-save]");
+    els.modelDelete = document.querySelector("[data-model-delete]");
+    els.testConnection = document.querySelector("[data-connection-test]");
+    els.modelMessage = document.getElementById("model-message");
+    els.testConnectionStatus = document.getElementById("test-connection-status");
+    els.jobList = document.getElementById("job-list");
+    els.jobListEmpty = document.getElementById("job-list-empty");
+    els.refreshJobsBtn = document.getElementById("refresh-jobs-btn");
     els.keyStatus = document.querySelector("[data-key-config-status]");
     els.apiKeyInput = document.getElementById("ai-api-key");
     els.keySave = document.querySelector("[data-key-save]");
@@ -724,6 +1047,8 @@
 
     initPanel();
     initKeyConfig();
+    initModelControls();
     setMode("convert");
+    loadRecentJobs();
   });
 })();

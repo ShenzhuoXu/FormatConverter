@@ -44,6 +44,18 @@ from pathlib import Path
 
 from .env_store import delete_env_key, key_status, write_env_key
 from .jobs import JobManager, JobStatus, UnknownJobTypeError
+from .llm_client import (
+    AuthenticationError,
+    ConnectionFailedError,
+    EmptyResponseError,
+    LLMClientError,
+    OpenAICompatClient,
+    PermissionDeniedError,
+    RateLimitError,
+    ServerError,
+)
+from .model_store import add_model, delete_model, list_models
+from .providers import MissingApiKeyError, UnknownProviderError, get_api_key, get_provider
 
 __all__ = [
     "JobWebServer",
@@ -267,7 +279,7 @@ class _IdAwareJobManager(JobManager):
         params = dict(params)
         if job_id is None:
             job_id = uuid.uuid4().hex
-        self._store(job_id, JobStatus.queued, "Job queued.", ())
+        self._store(job_id, JobStatus.queued, "Job queued.", (), job_type)
         thread = threading.Thread(
             target=self._run_job,
             args=(job_id, job_type, params),
@@ -490,6 +502,10 @@ class JobWebServer:
             self._send_json(handler, 200, {"status": "ok"})
         elif path == "/api/ai/key-status":
             self._send_key_status(handler)
+        elif path == "/api/jobs":
+            self._send_job_list(handler)
+        elif path == "/api/ai/models":
+            self._send_models(handler)
         elif path.startswith(STATIC_PREFIX):
             self._serve_static(handler, path[len(STATIC_PREFIX):])
         elif path.startswith("/api/jobs/"):
@@ -510,6 +526,10 @@ class JobWebServer:
             self._handle_submit(handler)
         elif path == "/api/ai/key":
             self._handle_save_key(handler)
+        elif path == "/api/ai/models":
+            self._handle_save_model(handler)
+        elif path == "/api/ai/connection-test":
+            self._handle_connection_test(handler)
         else:
             self._not_found(handler)
 
@@ -517,6 +537,8 @@ class JobWebServer:
         path = urllib.parse.urlsplit(handler.path).path
         if path == "/api/ai/key":
             self._handle_delete_key(handler)
+        elif path == "/api/ai/models":
+            self._handle_delete_model(handler)
         else:
             self._not_found(handler)
 
@@ -591,6 +613,124 @@ class JobWebServer:
         """Report whether an API key is configured and from which source."""
         configured, source = key_status()
         self._send_json(handler, 200, {"configured": configured, "source": source})
+
+    def _read_small_json_body(
+        self,
+        handler: BaseHTTPRequestHandler,
+        max_bytes: int = MAX_KEY_BODY_BYTES,
+    ) -> tuple[dict | None, str | None]:
+        """Read and parse a small JSON object body.
+
+        Returns ``(payload, None)`` on success or ``(None, error)`` with a
+        client-facing message for an empty/oversized/non-JSON/non-object body.
+        """
+        try:
+            length = int(handler.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return None, "Missing or empty request body."
+        if length > max_bytes:
+            return None, "Request body too large."
+        body = handler.rfile.read(length)
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return None, "Invalid JSON body."
+        if not isinstance(payload, dict):
+            return None, "Request body must be a JSON object."
+        return payload, None
+
+    # -- local model-name memory (Step 4.1) --------------------------------
+
+    def _send_models(self, handler: BaseHTTPRequestHandler) -> None:
+        """Return the locally remembered model-name list (no API key ever)."""
+        try:
+            models = list_models()
+        except Exception:  # noqa: BLE001 - never leak internals
+            models = []
+        self._send_json(handler, 200, {"models": models})
+
+    def _handle_save_model(self, handler: BaseHTTPRequestHandler) -> None:
+        """Save a model name to the git-ignored local model list."""
+        if not self._auth_ok(handler):
+            return self._send_json(handler, 403, {"error": "Forbidden."})
+        payload, error = self._read_small_json_body(handler)
+        if error:
+            return self._send_json(handler, 400, {"error": error})
+        try:
+            models = add_model(payload.get("model"))
+        except ValueError as exc:
+            return self._send_json(handler, 400, {"error": str(exc)})
+        except Exception:  # noqa: BLE001 - never leak internals
+            return self._send_json(handler, 500, {"error": "Could not save the model."})
+        return self._send_json(handler, 200, {"models": models})
+
+    def _handle_delete_model(self, handler: BaseHTTPRequestHandler) -> None:
+        """Remove a model name from the local model list (idempotent)."""
+        if not self._auth_ok(handler):
+            return self._send_json(handler, 403, {"error": "Forbidden."})
+        payload, error = self._read_small_json_body(handler)
+        if error:
+            return self._send_json(handler, 400, {"error": error})
+        try:
+            models = delete_model(payload.get("model"))
+        except ValueError as exc:
+            return self._send_json(handler, 400, {"error": str(exc)})
+        except Exception:  # noqa: BLE001 - never leak internals
+            return self._send_json(handler, 500, {"error": "Could not delete the model."})
+        return self._send_json(handler, 200, {"models": models})
+
+    # -- AI connection test (Step 4.1) -------------------------------------
+
+    def _handle_connection_test(self, handler: BaseHTTPRequestHandler) -> None:
+        """Run one minimal real request against the provider (auth required).
+
+        The UI must state that this fires a real network request that may
+        incur cost. Errors are mapped to short, sanitized messages; the API
+        key, request body, and raw provider responses are never echoed.
+        """
+        if not self._auth_ok(handler):
+            return self._send_json(handler, 403, {"error": "Forbidden."})
+        payload, error = self._read_small_json_body(handler)
+        if error:
+            return self._send_json(handler, 400, {"error": error})
+        provider = payload.get("provider")
+        model = payload.get("model")
+        if not isinstance(provider, str) or not provider.strip():
+            return self._send_json(handler, 400, {"error": "Missing provider."})
+        if not isinstance(model, str) or not model.strip():
+            return self._send_json(handler, 400, {"error": "Missing model."})
+        model = model.strip()
+
+        try:
+            provider_config = get_provider(provider)
+        except UnknownProviderError:
+            return self._send_json(handler, 400, {"error": "Unsupported provider."})
+
+        try:
+            api_key = get_api_key(provider_config)
+        except MissingApiKeyError:
+            return self._send_json(handler, 200, {"ok": False, "error": "未配置 API Key。"})
+
+        try:
+            client = OpenAICompatClient(provider_config, api_key)
+            client.complete(system="Reply with OK.", user="OK", model=model)
+        except AuthenticationError:
+            return self._send_json(handler, 200, {"ok": False, "error": "认证失败：API Key 无效或已过期。"})
+        except PermissionDeniedError:
+            return self._send_json(handler, 200, {"ok": False, "error": "无权限使用该模型或端点。"})
+        except RateLimitError:
+            return self._send_json(handler, 200, {"ok": False, "error": "请求过于频繁，请稍后再试。"})
+        except ConnectionFailedError:
+            return self._send_json(handler, 200, {"ok": False, "error": "无法连接 provider，请检查网络。"})
+        except ServerError:
+            return self._send_json(handler, 200, {"ok": False, "error": "provider 返回服务器错误。"})
+        except EmptyResponseError:
+            return self._send_json(handler, 200, {"ok": False, "error": "provider 返回空响应。"})
+        except LLMClientError:
+            return self._send_json(handler, 200, {"ok": False, "error": "连接测试失败。"})
+        return self._send_json(handler, 200, {"ok": True})
 
     # -- job submission -----------------------------------------------------
 
@@ -790,8 +930,26 @@ class JobWebServer:
         self._send_json(
             handler,
             200,
-            {"job_id": result.job_id, "status": result.status.value, "message": message},
+            {
+                "job_id": result.job_id,
+                "job_type": result.job_type,
+                "status": result.status.value,
+                "message": message,
+                "created_at": result.created_at,
+                "updated_at": result.updated_at,
+            },
         )
+
+    def _send_job_list(self, handler: BaseHTTPRequestHandler) -> None:
+        """Return recent jobs, newest-updated first, without output paths.
+
+        ``message`` is sanitized per job so no absolute server path (or
+        anything the JobManager stored) can leak to the client.
+        """
+        jobs = self._manager.list_recent(limit=20)
+        for job in jobs:
+            job["message"] = self._sanitize_message(job["message"], job["job_id"])
+        self._send_json(handler, 200, {"jobs": jobs})
 
     def _send_job_download(self, handler: BaseHTTPRequestHandler, job_id: str) -> None:
         result = self._manager.get(job_id)
