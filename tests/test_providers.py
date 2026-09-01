@@ -84,3 +84,31 @@ class TestApiKeyResolution:
             get_provider("nope")
         except UnknownProviderError as exc:
             assert secret not in str(exc)
+
+
+class TestDotEnvFallback:
+    def test_env_unset_dotenv_set_returns_dotenv_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from format_converter import env_store
+
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        env_store.write_env_key("sk-dotenv-value", tmp_path / ".env")
+        assert get_api_key(get_provider("orcarouter")) == "sk-dotenv-value"
+
+    def test_env_set_dotenv_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from format_converter import env_store
+
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-env-value")
+        env_store.write_env_key("sk-dotenv-value", tmp_path / ".env")
+        assert get_api_key(get_provider("orcarouter")) == "sk-env-value"
+
+    def test_env_unset_dotenv_empty_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        # No .env written: the fallback finds nothing.
+        with pytest.raises(MissingApiKeyError):
+            get_api_key(get_provider("orcarouter"))

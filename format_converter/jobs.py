@@ -13,9 +13,9 @@ Design notes:
   ``failed`` :class:`JobResult` instead of crashing anything.
 - State flow is ``queued -> running -> succeeded|failed``.
 - API keys never appear in results or messages.  As a last-resort safety net,
-  messages are scrubbed of the configured ``ORCAROUTER_API_KEY`` value before
-  being stored, so even an exception that accidentally embeds the key cannot
-  leak it.
+  messages are scrubbed of the configured ``ORCAROUTER_API_KEY`` value (from
+  the environment or the local ``.env`` file) before being stored, so even an
+  exception that accidentally embeds the key cannot leak it.
 
 This module deliberately has **no** HTTP, HTML, or browser dependencies; it
 only imports the Python standard library plus this package's worker modules.
@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from .cli import ai_clean
+from .env_store import read_env_key
 from .markdown_cleaner import clean_markdown_directory, clean_markdown_file
 from .pdf_converter import convert_pdf_directory, convert_pdf_file
 from .pipeline import run_pipeline
@@ -100,17 +101,21 @@ def _normalize_paths(paths: object) -> tuple[Path, ...]:
 def _sanitize_message(message: str) -> str:
     """Mask the configured API key inside ``message`` as a fallback.
 
-    Only acts when ``ORCAROUTER_API_KEY`` is set in the environment; the key
-    value itself is never stored or logged, only used as the search text.
+    Acts on both the ``ORCAROUTER_API_KEY`` environment variable and the
+    project-root ``.env`` value (when set); key values themselves are never
+    stored or logged, only used as the search text.
 
     This is a *defensive* backstop, not the primary guarantee: it does an exact
-    match on the current environment value, so a transformed or truncated key
+    match on the current configured values, so a transformed or truncated key
     would not be matched and a very short key could be over-masked. The primary
     guarantee is that handlers never place the key into a message at all.
     """
     key = os.environ.get("ORCAROUTER_API_KEY")
     if key:
-        return message.replace(key, "***")
+        message = message.replace(key, "***")
+    dotenv_key = read_env_key()
+    if dotenv_key:
+        message = message.replace(dotenv_key, "***")
     return message
 
 

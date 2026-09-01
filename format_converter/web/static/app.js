@@ -1,17 +1,22 @@
 /* FormatConverter single-page UI controller.
  *
  * Hard rules:
- *  - No local persistent storage and no third-party scripts/styles/fonts/images.
+ *  - No persistent browser storage and no third-party scripts/styles/fonts/images.
  *  - fetch() only ever targets same-origin relative paths (the local API).
- *  - No API-key input of any kind; AI key state is inferred from job results.
+ *  - API keys may be saved only to the project-root .env file; the key is
+ *    never stored in the browser, never logged, and the password input is
+ *    cleared immediately after any key request completes.
  */
 (function () {
   "use strict";
 
   var POLL_INTERVAL_MS = 1000;
 
-  var KEY_WARNING = "⚠ 未检测到可用 Key（请检查服务器环境变量 ORCAROUTER_API_KEY）";
-  var KEY_OK = "✓ Key 可用";
+  // Memory-only session token injected by the server into the index meta tag.
+  var sessionToken = (function () {
+    var meta = document.querySelector('meta[name="fc-session-token"]');
+    return meta ? meta.getAttribute("content") : "";
+  })();
 
   function onReady(fn) {
     if (document.readyState === "loading") {
@@ -19,12 +24,6 @@
     } else {
       fn();
     }
-  }
-
-  function delay(ms) {
-    return new Promise(function (resolve) {
-      setTimeout(resolve, ms);
-    });
   }
 
   function readJson(resp) {
@@ -37,13 +36,12 @@
     });
   }
 
-  function isKeyFailure(message) {
-    return /Missing API key|ORCAROUTER_API_KEY|rejected the API key/i.test(message);
-  }
-
   onReady(function () {
     document.querySelectorAll(".card[data-job-type]").forEach(function (card) {
       initCard(card);
+      if (card.getAttribute("data-job-type") === "ai-clean") {
+        initKeyConfig(card);
+      }
     });
   });
 
@@ -56,7 +54,6 @@
     var statusEl = card.querySelector(".status");
     var errorEl = card.querySelector(".error");
     var downloadArea = card.querySelector(".download-area");
-    var keyStatusEl = card.querySelector("[data-key-status]");
 
     var currentJobId = null;
 
@@ -209,10 +206,6 @@
               done = true;
               setBusy(false);
               setStatus("成功", "success");
-              if (keyStatusEl) {
-                keyStatusEl.textContent = KEY_OK;
-                keyStatusEl.className = "key-status ok";
-              }
               showDownloadLink();
               return;
             }
@@ -222,10 +215,6 @@
               var message = data && data.message ? data.message : "任务失败，无详细消息。";
               setStatus("失败", "failed");
               setError("任务失败：" + message);
-              if (keyStatusEl && isKeyFailure(message)) {
-                keyStatusEl.textContent = KEY_WARNING;
-                keyStatusEl.className = "key-status warn";
-              }
               return;
             }
             // Unknown status value: keep polling, keep the user informed.
@@ -245,5 +234,154 @@
 
       setTimeout(tick, 0);
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // OrcaRouter API key configuration (ai-clean card only)
+  // -----------------------------------------------------------------------
+
+  function initKeyConfig(card) {
+    var statusEl = card.querySelector("[data-key-config-status]");
+    var input = card.querySelector("#ai-api-key");
+    var saveBtn = card.querySelector("[data-key-save]");
+    var clearBtn = card.querySelector("[data-key-clear]");
+    var detectBtn = card.querySelector("[data-key-detect]");
+    var hintEl = card.querySelector("[data-key-hint]");
+    var errorEl = card.querySelector("[data-key-error]");
+
+    function setError(text) {
+      if (text) {
+        errorEl.textContent = text;
+        errorEl.hidden = false;
+      } else {
+        errorEl.textContent = "";
+        errorEl.hidden = true;
+      }
+    }
+
+    function renderStatus(stateText, sourceText, source) {
+      statusEl.textContent = "状态：" + stateText + "；来源：" + sourceText;
+      statusEl.className = "key-status";
+      if (source === "environment" || source === "dot_env") {
+        statusEl.className += " ok";
+      } else {
+        statusEl.className += " warn";
+      }
+    }
+
+    function loadStatus() {
+      setError("");
+      fetch("/api/ai/key-status")
+        .then(function (resp) {
+          return readJson(resp);
+        })
+        .then(function (data) {
+          if (!data || typeof data.configured !== "boolean") {
+            renderStatus("未配置", "未配置", "none");
+            hintEl.hidden = true;
+            clearBtn.hidden = true;
+            return;
+          }
+          var configured = data.configured;
+          var source = data.source;
+          if (configured && source === "environment") {
+            renderStatus("已配置", "系统环境变量", source);
+            hintEl.textContent = "当前仍优先使用系统环境变量；保存的 .env Key 会在环境变量未设置时生效。";
+            hintEl.hidden = false;
+            clearBtn.hidden = true;
+          } else if (configured && source === "dot_env") {
+            renderStatus("已配置", "本地 .env", source);
+            hintEl.hidden = true;
+            clearBtn.hidden = false;
+          } else {
+            renderStatus("未配置", "未配置", "none");
+            hintEl.hidden = true;
+            clearBtn.hidden = true;
+          }
+        })
+        .catch(function () {
+          renderStatus("未配置", "未配置", "none");
+          hintEl.hidden = true;
+          clearBtn.hidden = true;
+        });
+    }
+
+    function saveKey() {
+      setError("");
+      var value = input.value || "";
+      if (!value.trim()) {
+        setError("请先填写 API Key。");
+        input.focus();
+        return;
+      }
+      var headers = { "Content-Type": "application/json" };
+      if (sessionToken) {
+        headers["X-FC-Session-Token"] = sessionToken;
+      }
+      fetch("/api/ai/key", {
+        method: "POST",
+        headers: headers,
+        body: JSON.stringify({ api_key: value })
+      })
+        .then(function (resp) {
+          return readJson(resp).then(function (data) {
+            if (!resp.ok) {
+              if (resp.status === 403) {
+                throw new Error("会话已失效，请刷新页面后重试。");
+              }
+              throw new Error(
+                data && data.error ? data.error : "保存失败（HTTP " + resp.status + "）。"
+              );
+            }
+            return data;
+          });
+        })
+        .then(function () {
+          loadStatus();
+        })
+        .catch(function (err) {
+          setError(err.message);
+        })
+        .then(function () {
+          input.value = "";
+        });
+    }
+
+    function clearKey() {
+      setError("");
+      var headers = {};
+      if (sessionToken) {
+        headers["X-FC-Session-Token"] = sessionToken;
+      }
+      fetch("/api/ai/key", {
+        method: "DELETE",
+        headers: headers
+      })
+        .then(function (resp) {
+          return readJson(resp).then(function (data) {
+            if (!resp.ok) {
+              if (resp.status === 403) {
+                throw new Error("会话已失效，请刷新页面后重试。");
+              }
+              throw new Error(
+                data && data.error ? data.error : "清除失败（HTTP " + resp.status + "）。"
+              );
+            }
+            return data;
+          });
+        })
+        .then(function () {
+          loadStatus();
+        })
+        .catch(function (err) {
+          setError(err.message);
+        });
+    }
+
+    saveBtn.addEventListener("click", saveKey);
+    clearBtn.addEventListener("click", clearKey);
+    detectBtn.addEventListener("click", loadStatus);
+
+    loadStatus();
   }
 })();

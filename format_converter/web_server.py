@@ -2,15 +2,18 @@
 
 This module exposes a small JSON task API (plus optional, protected static
 file serving) over plain HTTP bound exclusively to the loopback interface.
-There is deliberately **no** browser UI beyond a static information page:
+There is deliberately no external network exposure:
 
-- No API-key input box, no ``localStorage``, and no scripts that touch user
-  directories.
-- The HTTP layer never reads an API key; AI tasks resolve their key deep
+- The UI may save the user's OrcaRouter API key into a git-ignored
+  project-root ``.env`` file; keys are never stored in the browser or in
+  any git-tracked file.
+- The HTTP layer never logs an API key; AI tasks resolve their key deep
   inside :mod:`format_converter.jobs`, far away from this module.
 - Responses never carry cross-origin (CORS) headers.
 - Uploads are written only into a fresh per-job temporary directory created
   under the server's own temporary root, which is deleted on shutdown.
+- Key write/delete endpoints require a memory-only session token plus
+  loopback ``Host``/``Origin`` headers (see :meth:`JobWebServer._auth_ok`).
 
 Only the Python standard library and this package's modules are imported.
 """
@@ -25,6 +28,7 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import sys
 import tempfile
@@ -38,6 +42,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .env_store import delete_env_key, key_status, write_env_key
 from .jobs import JobManager, JobStatus, UnknownJobTypeError
 
 __all__ = [
@@ -67,6 +72,9 @@ STATIC_PREFIX = "/static/"
 
 # Ceiling for a single request body, to avoid unbounded memory use.
 MAX_BODY_BYTES = 256 * 1024 * 1024
+
+# Ceiling for the small JSON body of the API-key save endpoint.
+MAX_KEY_BODY_BYTES = 16 * 1024
 
 # File extensions the web layer accepts per job type (matched lowercased).
 _ALLOWED_EXTENSIONS: dict[str, frozenset[str]] = {
@@ -117,6 +125,43 @@ def _is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True when a ``Host`` header value names a loopback address.
+
+    Accepts ``127.0.0.1``, ``127.0.0.1:8765``, ``localhost``, and
+    ``[::1]:8765``; the optional port is stripped before the loopback check.
+    Anything else (including DNS-rebinding names such as
+    ``127.0.0.1.evil``) is rejected.
+    """
+    if not host:
+        return False
+    host = host.strip()
+    try:
+        hostname = urllib.parse.urlsplit("//" + host).hostname or ""
+    except ValueError:
+        return False
+    return _is_loopback(hostname)
+
+
+def _is_loopback_origin(origin: str) -> bool:
+    """True when an ``Origin`` header value is a loopback http(s) origin.
+
+    The scheme must be ``http`` or ``https`` and the hostname must be a
+    genuine loopback address. ``null``, a missing value, or a non-loopback
+    host (e.g. ``http://127.0.0.1.evil.com``) are all rejected.
+    """
+    if not origin:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(origin)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    hostname = parts.hostname or ""
+    return _is_loopback(hostname)
 
 
 def _bool_param(params: dict, name: str, default: bool) -> bool:
@@ -222,6 +267,12 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             self.server.web_server._send_json(self, 500, {"error": "Internal server error."})
 
+    def do_DELETE(self) -> None:
+        try:
+            self.server.web_server._handle_delete(self)
+        except Exception:  # noqa: BLE001
+            self.server.web_server._send_json(self, 500, {"error": "Internal server error."})
+
     def log_message(self, fmt: str, *args: object) -> None:  # noqa: A002
         # fmt/args are deliberately ignored: we emit a fixed, sanitized shape.
         # ``command``/``path`` may be missing or None when parse_request()
@@ -286,6 +337,11 @@ class JobWebServer:
         self._server: _JobHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._bound_port: int | None = None
+
+        # Random, memory-only session token: never written to disk and only
+        # valid for the lifetime of this server process. It is injected into
+        # the served index.html so the UI can authenticate key write/delete.
+        self._session_token = secrets.token_urlsafe(32)
 
     # -- public API ---------------------------------------------------------
 
@@ -381,6 +437,8 @@ class JobWebServer:
             self._send_index(handler)
         elif path == "/health":
             self._send_json(handler, 200, {"status": "ok"})
+        elif path == "/api/ai/key-status":
+            self._send_key_status(handler)
         elif path.startswith(STATIC_PREFIX):
             self._serve_static(handler, path[len(STATIC_PREFIX):])
         elif path.startswith("/api/jobs/"):
@@ -399,8 +457,86 @@ class JobWebServer:
         path = urllib.parse.urlsplit(handler.path).path
         if path == "/api/jobs":
             self._handle_submit(handler)
+        elif path == "/api/ai/key":
+            self._handle_save_key(handler)
         else:
             self._not_found(handler)
+
+    def _handle_delete(self, handler: BaseHTTPRequestHandler) -> None:
+        path = urllib.parse.urlsplit(handler.path).path
+        if path == "/api/ai/key":
+            self._handle_delete_key(handler)
+        else:
+            self._not_found(handler)
+
+    # -- local API-key configuration ---------------------------------------
+
+    def _auth_ok(self, handler: BaseHTTPRequestHandler) -> bool:
+        """True only for a loopback, session-token-authenticated key request.
+
+        Requires a loopback ``Host`` header, a loopback http(s) ``Origin``
+        header, and an ``X-FC-Session-Token`` header equal (constant-time) to
+        this server's memory-only session token. Any failure returns False.
+        """
+        host = handler.headers.get("Host", "")
+        origin = handler.headers.get("Origin", "")
+        if not _is_loopback_host(host) or not _is_loopback_origin(origin):
+            return False
+        provided = handler.headers.get("X-FC-Session-Token", "")
+        return secrets.compare_digest(provided, self._session_token)
+
+    def _handle_save_key(self, handler: BaseHTTPRequestHandler) -> None:
+        """Validate and save the user's API key into the project ``.env``."""
+        if not self._auth_ok(handler):
+            return self._send_json(handler, 403, {"error": "Forbidden."})
+        try:
+            length = int(handler.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return self._send_json(handler, 400, {"error": "Missing or empty request body."})
+        if length > MAX_KEY_BODY_BYTES:
+            return self._send_json(handler, 413, {"error": "Request body too large."})
+        body = handler.rfile.read(length)
+
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return self._send_json(handler, 400, {"error": "Invalid JSON body."})
+        if not isinstance(payload, dict):
+            return self._send_json(handler, 400, {"error": "Request body must be a JSON object."})
+
+        api_key = payload.get("api_key")
+        if not isinstance(api_key, str):
+            return self._send_json(handler, 400, {"error": "Invalid api_key."})
+        stripped = api_key.strip()
+        if not (8 <= len(stripped) <= 1024):
+            return self._send_json(handler, 400, {"error": "Invalid api_key."})
+
+        try:
+            write_env_key(stripped)
+        except Exception:  # noqa: BLE001 - never leak the key or the path
+            return self._send_json(handler, 500, {"error": "Could not save the API key."})
+        return self._send_json(handler, 200, {"saved": True})
+
+    def _handle_delete_key(self, handler: BaseHTTPRequestHandler) -> None:
+        """Remove the ``ORCAROUTER_API_KEY`` entry from the project ``.env``.
+
+        Idempotent. Never touches Windows/system/process environment
+        variables and never echoes the key.
+        """
+        if not self._auth_ok(handler):
+            return self._send_json(handler, 403, {"error": "Forbidden."})
+        try:
+            delete_env_key()
+        except Exception:  # noqa: BLE001 - never leak the key or the path
+            return self._send_json(handler, 500, {"error": "Could not delete the API key."})
+        return self._send_json(handler, 200, {"deleted": True})
+
+    def _send_key_status(self, handler: BaseHTTPRequestHandler) -> None:
+        """Report whether an API key is configured and from which source."""
+        configured, source = key_status()
+        self._send_json(handler, 200, {"configured": configured, "source": source})
 
     # -- job submission -----------------------------------------------------
 
@@ -631,7 +767,16 @@ class JobWebServer:
                 except OSError:
                     pass
                 else:
-                    self._send_bytes(handler, 200, data, "text/html; charset=utf-8")
+                    # Inject the live, memory-only session token by replacing
+                    # the placeholder; the served copy is marked no-store so a
+                    # stale token is never cached.
+                    data = data.replace(
+                        b"__FC_SESSION_TOKEN__", self._session_token.encode("ascii")
+                    )
+                    self._send_bytes(
+                        handler, 200, data, "text/html; charset=utf-8",
+                        {"Cache-Control": "no-store"},
+                    )
                     return
         body = _INDEX_HTML.encode("utf-8")
         self._send_bytes(handler, 200, body, "text/html; charset=utf-8")

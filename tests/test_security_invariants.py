@@ -42,6 +42,7 @@ CORE_MODULES = [
     "pipeline.py",
     "markdown_cleaner.py",
     "providers.py",
+    "env_store.py",
     "llm_client.py",
     "ai_cleaner.py",
     "config.py",
@@ -66,14 +67,14 @@ FORBIDDEN_THIRD_PARTY_ROOTS = {
 FORBIDDEN_RAW_NETWORK_ROOTS = {"socket"}
 FORBIDDEN_IMPORT_FROM_MODULES = {"http.client"}
 
-# ``_KEY_ASSIGN_RE`` deliberately matches only the ``VAR = "..."`` assignment
-# shape (the only way the project would ever write a key literally); it does
-# not cover JSON/YAML shapes. That is an accepted boundary: the generic
-# ``sk-`` scan below is the real backstop and would catch a real key value
-# regardless of the surrounding syntax. Test doubles (``sk-test...``) are
-# exempted explicitly with a negative lookahead so this does not depend on the
-# accidental hyphen-splitting of the existing fake values.
-_KEY_ASSIGN_RE = re.compile(r'ORCAROUTER_API_KEY\s*=\s*["\']([^"\']*)["\']')
+# ``_KEY_ASSIGN_RE`` matches both the ``VAR = "..."`` shape and bare unquoted
+# assignments (``VAR=value``), which is the shape used by ``.env.example``.
+# It does not cover JSON/YAML shapes. That is an accepted boundary: the
+# generic ``sk-`` scan below is the real backstop and would catch a real key
+# value regardless of the surrounding syntax. Test doubles (``sk-test...``)
+# are exempted explicitly with a negative lookahead so this does not depend on
+# the accidental hyphen-splitting of the existing fake values.
+_KEY_ASSIGN_RE = re.compile(r'ORCAROUTER_API_KEY\s*=\s*["\']?([^"\'\s#]+)["\']?')
 _SK_REAL_KEY_RE = re.compile(r"(?!sk-test)sk-[A-Za-z0-9]{12,}")
 _CJK_RE = re.compile(r"[一-鿿]")
 
@@ -115,7 +116,15 @@ def _is_placeholder(value: str) -> bool:
         return True
     if v.startswith("sk-test"):  # test doubles (sk-test, sk-test-12345, ...)
         return True
-    if v.lower() in {"your-key", "your_key", "your key"}:
+    if v.lower() in {
+        "your-key",
+        "your_key",
+        "your key",
+        "your_api_key_here",
+        "your_api_key",
+        "your-api-key",
+        "your-key",
+    }:
         return True
     return False
 
@@ -144,6 +153,34 @@ class TestNoKeyOnDisk:
             assert ".pytest-tmp" not in rel, f"pytest temp tracked: {rel}"
             assert ".pytest_cache" not in rel, f"pytest cache tracked: {rel}"
             assert "__pycache__" not in rel, f"__pycache__ tracked: {rel}"
+
+
+class TestDotEnvTracking:
+    def test_env_not_tracked_and_ignored(self) -> None:
+        proc = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", ".env"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode != 0, ".env must not be tracked by git"
+        proc = subprocess.run(
+            ["git", "check-ignore", ".env"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, ".env must be git-ignored"
+
+    def test_env_example_tracked_with_placeholder(self) -> None:
+        tracked = {p.relative_to(ROOT).as_posix() for p in _git_tracked_files()}
+        assert ".env.example" in tracked, ".env.example must be tracked by git"
+        content = (ROOT / ".env.example").read_text(encoding="utf-8")
+        match = _KEY_ASSIGN_RE.search(content)
+        assert match is not None, ".env.example must contain an ORCAROUTER_API_KEY line"
+        assert _is_placeholder(match.group(1)), (
+            f".env.example value {match.group(1)!r} must be a placeholder"
+        )
 
 
 class TestNoNetworkImports:

@@ -2,14 +2,18 @@
 
 First version ships a single OpenAI-compatible preset: ``orcarouter``.
 The feature is opt-in: the user must pass ``--provider orcarouter`` and
-provide their own API key through an environment variable. Keys are never
-accepted as CLI arguments and never stored in project files.
+provide their own API key either through the ``ORCAROUTER_API_KEY``
+environment variable or through a git-ignored project-root ``.env`` file.
+Keys are never accepted as CLI arguments and never written to git-tracked
+files, logs, or exception messages.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+
+from .env_store import read_env_key
 
 
 class ProviderError(Exception):
@@ -69,13 +73,18 @@ def get_provider(name: str) -> ProviderConfig:
 
 
 def get_api_key(provider: ProviderConfig) -> str:
-    """Read a provider's API key from its environment variable.
+    """Read a provider's API key from the environment or the local ``.env``.
 
-    Raises :class:`MissingApiKeyError` when the variable is unset, empty,
-    or whitespace-only. The resolved key is returned to the caller and is
-    never written to files, logs, or exception messages.
+    Precedence: the ``ORCAROUTER_API_KEY`` environment variable first, then
+    the project-root ``.env`` file (read on every call; nothing is cached).
+    Raises :class:`MissingApiKeyError` when neither source is set. The
+    resolved key is returned to the caller and is never written to files,
+    logs, or exception messages.
     """
     value = os.environ.get(provider.api_key_env_var)
-    if not value or not value.strip():
-        raise MissingApiKeyError(provider)
-    return value
+    if value and value.strip():
+        return value
+    dotenv_value = read_env_key()
+    if dotenv_value:
+        return dotenv_value
+    raise MissingApiKeyError(provider)

@@ -12,6 +12,8 @@ import base64
 import http.client
 import io
 import json
+import os
+import re
 import socket
 import threading
 import time
@@ -20,7 +22,13 @@ from pathlib import Path
 
 import pytest
 
-from format_converter.web_server import MAX_BODY_BYTES, JobWebServer, create_server
+from format_converter import env_store
+from format_converter.web_server import (
+    DEFAULT_STATIC_DIR,
+    MAX_BODY_BYTES,
+    JobWebServer,
+    create_server,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -590,3 +598,275 @@ class TestSecurity:
 
         # the server must still be healthy
         assert _request(port, "GET", "/health")[0] == 200
+
+
+# ---------------------------------------------------------------------------
+# local API-key configuration endpoints (session-token protected)
+# ---------------------------------------------------------------------------
+
+
+def _get_session_token(port: int) -> str:
+    """GET / and extract the injected session token from the served index."""
+    status, _, data = _request(port, "GET", "/")
+    assert status == 200
+    match = re.search(rb'name="fc-session-token"\s+content="([^"]+)"', data)
+    assert match is not None, "served index.html has no fc-session-token meta tag"
+    token = match.group(1).decode("ascii")
+    assert token != "__FC_SESSION_TOKEN__"
+    assert len(token) > 20
+    return token
+
+
+def _save_key(port: int, token: str, api_key: str, *, origin: str | None = None,
+              host: str | None = None) -> tuple[int, dict[str, str], bytes]:
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["X-FC-Session-Token"] = token
+    if origin is None:
+        origin = f"http://127.0.0.1:{port}"
+    headers["Origin"] = origin
+    if host is not None:
+        headers["Host"] = host
+    body = json.dumps({"api_key": api_key}).encode("utf-8")
+    return _request(port, "POST", "/api/ai/key", body=body, headers=headers)
+
+
+def _delete_key(port: int, token: str | None = None, *, origin: str | None = None,
+                host: str | None = None) -> tuple[int, dict[str, str], bytes]:
+    headers: dict[str, str] = {}
+    if token is not None:
+        headers["X-FC-Session-Token"] = token
+    if origin is None:
+        origin = f"http://127.0.0.1:{port}"
+    headers["Origin"] = origin
+    if host is not None:
+        headers["Host"] = host
+    return _request(port, "DELETE", "/api/ai/key", headers=headers)
+
+
+class TestKeyConfigEndpoints:
+    def test_key_status_none(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        status, headers, data = _request(port, "GET", "/api/ai/key-status")
+        assert status == 200
+        assert json.loads(data.decode("utf-8")) == {"configured": False, "source": "none"}
+        assert "Access-Control-Allow-Origin" not in headers
+
+    def test_key_status_environment(self, make_server, monkeypatch) -> None:
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-env-secret-value")
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        status, _, data = _request(port, "GET", "/api/ai/key-status")
+        assert status == 200
+        assert json.loads(data.decode("utf-8")) == {
+            "configured": True,
+            "source": "environment",
+        }
+        body = data.decode("utf-8")
+        assert "sk-" not in body
+        assert "sk-env-secret-value" not in body
+
+    def test_key_status_dotenv(self, make_server, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        env_store.write_env_key("sk-dotenv-value", tmp_path / ".env")
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        status, _, data = _request(port, "GET", "/api/ai/key-status")
+        assert status == 200
+        assert json.loads(data.decode("utf-8")) == {
+            "configured": True,
+            "source": "dot_env",
+        }
+
+    def test_save_key_writes_env_and_preserves_lines(
+        self, make_server, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        (tmp_path / ".env").write_bytes(b"FOO=bar\n")
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        status, _, data = _save_key(port, token, "  sk-test-saved-value  ")
+        assert status == 200
+        assert json.loads(data.decode("utf-8")) == {"saved": True}
+        assert b"sk-test-saved-value" not in data
+        content = (tmp_path / ".env").read_bytes()
+        assert b'ORCAROUTER_API_KEY="sk-test-saved-value"\n' in content
+        assert b"FOO=bar\n" in content
+
+    def test_save_key_requires_auth(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        body = json.dumps({"api_key": "sk-abc-12345"}).encode("utf-8")
+
+        # missing token
+        headers = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"}
+        status, _, _ = _request(port, "POST", "/api/ai/key", body=body, headers=headers)
+        assert status == 403
+        # wrong token
+        assert _save_key(port, "wrong-token", "sk-abc-12345")[0] == 403
+        # missing Origin
+        headers = {"Content-Type": "application/json", "X-FC-Session-Token": token}
+        status, _, _ = _request(port, "POST", "/api/ai/key", body=body, headers=headers)
+        assert status == 403
+        # non-loopback Origin
+        assert _save_key(port, token, "sk-abc-12345", origin="http://evil.example/")[0] == 403
+        # DNS-rebinding Origin host
+        assert _save_key(port, token, "sk-abc-12345", origin="http://127.0.0.1.evil.com/")[0] == 403
+        # non-loopback Host
+        assert _save_key(port, token, "sk-abc-12345", host="evil.example")[0] == 403
+        # Host that merely starts with a loopback prefix
+        assert _save_key(port, token, "sk-abc-12345", host="127.0.0.1.evil:1234")[0] == 403
+
+    def test_save_key_validation(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        headers = {
+            "Content-Type": "application/json",
+            "X-FC-Session-Token": token,
+            "Origin": f"http://127.0.0.1:{port}",
+        }
+
+        def post(payload: object) -> int:
+            body = json.dumps(payload).encode("utf-8")
+            return _request(port, "POST", "/api/ai/key", body=body, headers=headers)[0]
+
+        assert post({}) == 400  # missing api_key
+        assert post({"api_key": 123}) == 400  # not a string
+        assert post({"api_key": "   "}) == 400  # whitespace-only
+        assert post({"api_key": "1234567"}) == 400  # too short
+        assert post({"api_key": "x" * 1025}) == 400  # too long
+        status, _, _ = _request(
+            port, "POST", "/api/ai/key", body=b"not json", headers=headers
+        )
+        assert status == 400  # non-JSON body
+
+    def test_delete_key_removes_only_key_line(
+        self, make_server, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        (tmp_path / ".env").write_bytes(b"FOO=bar\nORCAROUTER_API_KEY=sk-test-old\nBAZ=qux\n")
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        status, _, data = _delete_key(port, token)
+        assert status == 200
+        assert json.loads(data.decode("utf-8")) == {"deleted": True}
+        assert b"old" not in data
+        assert (tmp_path / ".env").read_bytes() == b"FOO=bar\nBAZ=qux\n"
+
+    def test_delete_key_requires_auth(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        # missing token
+        assert _delete_key(port)[0] == 403
+        # wrong token
+        assert _delete_key(port, "wrong-token")[0] == 403
+        # missing Origin
+        headers = {"X-FC-Session-Token": token}
+        status, _, _ = _request(port, "DELETE", "/api/ai/key", headers=headers)
+        assert status == 403
+        # non-loopback Origin
+        assert _delete_key(port, token, origin="http://evil.example/")[0] == 403
+        # non-loopback Host
+        assert _delete_key(port, token, host="evil.example")[0] == 403
+        # DNS-rebinding Host
+        assert _delete_key(port, token, host="127.0.0.1.evil:1234")[0] == 403
+
+    def test_environment_source_not_removable_by_web(
+        self, make_server, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-env-value")
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        # POST saves a .env backup
+        status, _, _ = _save_key(port, token, "sk-test-dotenv-backup")
+        assert status == 200
+        assert (tmp_path / ".env").read_bytes() == b'ORCAROUTER_API_KEY="sk-test-dotenv-backup"\n'
+        # DELETE clears only the .env line
+        status, _, _ = _delete_key(port, token)
+        assert status == 200
+        assert (tmp_path / ".env").read_bytes() == b""
+        # the process environment variable is untouched
+        assert os.environ["ORCAROUTER_API_KEY"] == "sk-env-value"
+        # status stays "environment" throughout
+        status, _, data = _request(port, "GET", "/api/ai/key-status")
+        assert json.loads(data.decode("utf-8")) == {
+            "configured": True,
+            "source": "environment",
+        }
+
+    def test_two_servers_have_different_tokens(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server1, port1 = make_server(static_dir=DEFAULT_STATIC_DIR)
+        server2, port2 = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token1 = _get_session_token(port1)
+        token2 = _get_session_token(port2)
+        assert token1 != token2
+        # a token from server1 is rejected by server2 (stale/foreign token)
+        assert _save_key(port2, token1, "sk-abc-12345")[0] == 403
+
+    def test_no_key_material_in_any_response(
+        self, make_server, monkeypatch
+    ) -> None:
+        secret = "sk-SUPER-SECRET-VALUE-987654321"
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        responses: list[tuple[int, bytes]] = []
+
+        # status endpoint
+        r = _request(port, "GET", "/api/ai/key-status")
+        responses.append((r[0], r[2]))
+        # 403 (missing token, secret in the request body we send)
+        headers = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"}
+        body = json.dumps({"api_key": secret}).encode("utf-8")
+        r = _request(port, "POST", "/api/ai/key", body=body, headers=headers)
+        responses.append((r[0], r[2]))
+        # 403 (missing Origin)
+        headers = {"Content-Type": "application/json", "X-FC-Session-Token": token}
+        r = _request(port, "POST", "/api/ai/key", body=body, headers=headers)
+        responses.append((r[0], r[2]))
+        # 400 (too short)
+        headers = {
+            "Content-Type": "application/json",
+            "X-FC-Session-Token": token,
+            "Origin": f"http://127.0.0.1:{port}",
+        }
+        r = _request(port, "POST", "/api/ai/key", body=json.dumps({"api_key": secret[:5]}).encode(), headers=headers)
+        responses.append((r[0], r[2]))
+
+        # 500 (write failure)
+        def _boom(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("format_converter.web_server.write_env_key", _boom)
+        r = _save_key(port, token, secret)
+        responses.append((r[0], r[2]))
+
+        for status, data in responses:
+            assert status in (200, 400, 403, 500)
+            body = data.decode("utf-8", "replace")
+            assert secret not in body, f"key leaked in HTTP {status}: {body!r}"
+            assert "sk-" not in body, f"sk- prefix leaked in HTTP {status}: {body!r}"
+
+    def test_no_cors_on_post_delete(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        status, headers, _ = _save_key(port, token, "sk-abc-12345")
+        assert status == 200
+        assert "Access-Control-Allow-Origin" not in headers
+        status, headers, _ = _delete_key(port, token)
+        assert status == 200
+        assert "Access-Control-Allow-Origin" not in headers
+
+    def test_index_serves_token_and_no_store(self, make_server, monkeypatch) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        status, headers, data = _request(port, "GET", "/")
+        assert status == 200
+        assert headers.get("Cache-Control") == "no-store"
+        match = re.search(rb'name="fc-session-token"\s+content="([^"]+)"', data)
+        assert match is not None
+        assert match.group(1).decode("ascii") == server._session_token

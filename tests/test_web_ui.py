@@ -181,11 +181,42 @@ class TestPageSourceCompliance:
         assert "cookie" not in js
         assert 'fetch("http' not in js
         assert 'fetch(`http' not in js
+        assert "sessionStorage" not in js
+        assert "indexedDB" not in js
+        assert "console.log" not in js
+        # The key request flow sends the session token header and clears the
+        # password input after each request.
+        assert "X-FC-Session-Token" in js
+        assert 'value = ""' in js
 
-    def test_index_has_no_api_key_input(self) -> None:
+    def test_index_contains_key_config_region(self) -> None:
         html = INDEX_HTML.read_text(encoding="utf-8")
-        assert 'type="password"' not in html
-        assert "apikey" not in html.lower()
+        # The new OrcaRouter API config region: password input + copy + buttons.
+        assert 'type="password"' in html
+        assert 'id="ai-api-key"' in html
+        assert 'name="api_key"' in html
+        assert 'autocomplete="off"' in html
+        assert 'autocorrect="off"' in html
+        assert 'autocapitalize="off"' in html
+        assert 'spellcheck="false"' in html
+        assert "API Key 仅保存于本机项目目录的 .env 文件，不保存到浏览器。" in html
+        assert "执行 AI 校对时，Python 后端会使用该 Key 调用 OrcaRouter（真实网络请求）。" in html
+        assert 'data-key-save' in html
+        assert 'data-key-clear' in html
+        assert 'data-key-detect' in html
+        assert "保存到本地" in html
+        assert "清除本地 Key" in html
+        assert "重新检测" in html
+        assert 'data-key-config-status' in html
+
+    def test_index_contains_session_token_placeholder(self) -> None:
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        # The tracked static file must contain only the placeholder; the server
+        # replaces it with the live token when serving.
+        assert 'name="fc-session-token"' in html
+        assert "__FC_SESSION_TOKEN__" in html
+        assert "sessionStorage" not in html
+        assert "indexedDB" not in html
 
 
 # ---------------------------------------------------------------------------
