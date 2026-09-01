@@ -2,9 +2,10 @@
 
 Stores a small list of model names in a git-ignored JSON file at the project
 root (``.formatconverter-models.json``). **Only model names are stored --
-never an API key.** Reads/writes are atomic and serialized with a module lock
-so the multi-threaded web server can save/delete concurrently without losing
-entries.
+never an API key.** Names that look like API keys (``sk-...``) are rejected on
+save and filtered out on read, so a key can never be stored or returned.
+Reads/writes are atomic and serialized with a module lock so the
+multi-threaded web server can save/delete concurrently without losing entries.
 
 File format::
 
@@ -37,6 +38,16 @@ _MAX_MODEL_LENGTH = 200
 _MODELS_LOCK = threading.RLock()
 
 
+def _is_secret_shaped(value: str) -> bool:
+    """True when a trimmed model name looks like an API key, not a model.
+
+    OrcaRouter/OpenRouter model names never start with ``sk-``, so this is a
+    safe, explicit boundary against a user pasting an API key into the model
+    name field.
+    """
+    return value.startswith("sk-")
+
+
 def models_path() -> Path:
     """Return the project-root model-memory file path."""
     return PROJECT_ROOT / _MODELS_FILE
@@ -49,6 +60,9 @@ def validate_model(model: str) -> str:
     value = model.strip()
     if not value:
         raise ValueError("model name must not be empty")
+    if _is_secret_shaped(value):
+        # Deliberately generic: never echo the rejected value back.
+        raise ValueError("model name must not look like an API key")
     if len(value) > _MAX_MODEL_LENGTH:
         raise ValueError(f"model name too long (max {_MAX_MODEL_LENGTH} chars)")
     if "\n" in value or "\r" in value:
@@ -80,7 +94,10 @@ def _read_models(path: Path) -> list[str]:
     """Return the stored model list (empty for a missing/malformed file).
 
     Entries are deduped (exact, case-sensitive) and trimmed on read so a
-    hand-edited file cannot produce duplicates or blank entries.
+    hand-edited file cannot produce duplicates or blank entries. Secret-shaped
+    entries (``sk-...``) are dropped so a key saved before this rule existed
+    can never be returned. Filtering never raises: a dirty file still reads
+    as its remaining legal names rather than failing the whole list.
     """
     try:
         raw = _read_raw(path)
@@ -100,7 +117,7 @@ def _read_models(path: Path) -> list[str]:
     for item in models:
         if isinstance(item, str):
             value = item.strip()
-            if value and value not in seen:
+            if value and not _is_secret_shaped(value) and value not in seen:
                 seen.add(value)
                 result.append(value)
     return result

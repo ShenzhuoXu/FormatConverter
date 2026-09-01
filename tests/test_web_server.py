@@ -1497,6 +1497,55 @@ class TestModelStore:
         assert _save_model(port, token, "a\nb")[0] == 400  # embedded LF
         assert _save_model(port, token, "a\rb")[0] == 400  # embedded CR
 
+    def test_save_key_shaped_model_400_and_never_returned(
+        self, make_server, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        token = _get_session_token(port)
+        # Built at runtime so the joined secret never appears literally in the
+        # tracked source (the repo-wide key scan must stay clean).
+        secret = "sk-" + "THISISAREALKEY123456"
+
+        status, _, data = _save_model(port, token, secret)
+        assert status == 400
+        body = data.decode("utf-8", "replace")
+        assert secret not in body
+        assert "sk-" not in body
+
+        # the rejected value is never remembered
+        status, _, data = _request(port, "GET", "/api/ai/models")
+        assert status == 200
+        assert json.loads(data.decode("utf-8")) == {"models": []}
+
+        # a legal model name still saves and lists after the rejection
+        assert _save_model(port, token, "deepseek/deepseek-v4-flash-free")[0] == 200
+        status, _, data = _request(port, "GET", "/api/ai/models")
+        assert json.loads(data.decode("utf-8")) == {
+            "models": ["deepseek/deepseek-v4-flash-free"]
+        }
+
+    def test_get_models_filters_preexisting_secret(
+        self, make_server, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
+        from format_converter import model_store
+
+        secret = "sk-" + "THISISAREALKEY123456"
+        # The autouse model-store fixture points at this test's temp file;
+        # seed it with dirty history the way an old file could contain.
+        model_store.models_path().write_text(
+            json.dumps({"models": ["deepseek/deepseek-v4-flash-free", secret]}),
+            encoding="utf-8",
+        )
+        server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
+        status, _, data = _request(port, "GET", "/api/ai/models")
+        assert status == 200
+        assert json.loads(data.decode("utf-8")) == {
+            "models": ["deepseek/deepseek-v4-flash-free"]
+        }
+        assert secret not in data.decode("utf-8", "replace")
+
     def test_delete_requires_auth(self, make_server, monkeypatch) -> None:
         monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
         server, port = make_server(static_dir=DEFAULT_STATIC_DIR)
