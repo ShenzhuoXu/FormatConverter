@@ -15,6 +15,7 @@
 | Step 5 | Windows 一键启动（启动图形界面.bat + 启动层） | ✅ 通过 | `f0f6fdf`（+`51c7419` 修复） | 170 tests 全绿，独立审查通过 |
 | Step 6 | 补测试与修复（端到端回归 + 安全覆盖） | ✅ 通过 | `9f10a48` | 198 tests 全绿（含无 Key 环境），独立审查通过 |
 | Step 7 | 发布准备（README/CHANGELOG/版本号/发布清单） | ✅ 通过 | `e7ccb15` | 198 tests 全绿，最终全分支审查通过 |
+| Step 8 | v0.2.1 本地 OrcaRouter API Key 配置（env > .env > 未配置） | ✅ 通过 | `88bfb23`（实现）+ `f5204c3`（安全加固） | 254 tests 全绿（含无 Key 环境），独立安全审查 + 复审通过 |
 
 ---
 
@@ -314,3 +315,55 @@
 - **修复**：统一降级 `openai==3.6.0` → `openai==1.106.0`（满足 marker-pdf `<2.0.0`）；`tests/test_llm_client.py` 的 `httpx2` → `httpx`（openai 1.x 的 HTTP 客户端）；`llm_client.py` 无需改动（`OpenAI(base_url=...)`/`chat.completions`/`AuthenticationError`/`PermissionDeniedError`/`APIStatusError` 等错误类在 1.106.0 全部存在，已实测）。
 - **验证**：`pip install -r requirements.txt --dry-run` → 退出码 0（解析成功，含 marker-pdf/torch 整树）；venv 降到 openai 1.106.0 后全量 **198 passed**（含无 Key 环境），`compileall` 0、`git diff --check` 通过。
 - CHANGELOG 与 release-checklist 已同步（新增依赖解析验证项）。
+
+---
+
+## Step 8 — v0.2.1：本地 OrcaRouter API Key 配置
+
+### 状态：✅ 验收通过（2026-09-01）
+
+### 范围
+- 在既有本机 Web UI 与 CLI 基础上，增加安全的本地 OrcaRouter API Key 配置。Key 来源优先级固定为：系统环境变量 `ORCAROUTER_API_KEY` > 项目根目录 `.env` > 未配置。新增 Web API（key-status / save / delete）、AI 卡片「OrcaRouter API 配置」区域、严格的 `.env` 解析与写入、会话令牌防护。
+
+### 提交
+- `88bfb23` `feat: add local .env API key config with session-token protection`（16 文件，+1247/−64）—— 实现。
+- `f5204c3` `fix: harden .env key config after security review`（5 文件，+202/−52）—— main 代理审阅 + 独立安全复审后的加固（见「修复记录」）。
+
+### 改动内容
+- `format_converter/env_store.py`（新增）：字节级严格 `.env` 解析；`dotenv_path` / `read_env_key`（首个非空值；空/`""`/`''` 视为未设置）/ `write_env_key`（首处替换、去重、逐字保留其它行、CRLF 保持、临时文件 + 原子 `os.replace`）/ `delete_env_key`（仅删目标行、幂等）/ `key_status`（环境 > `.env` > 无）。模块级 `RLock` 串行化并发写/删；读用 `_read_raw`（仅 `FileNotFoundError` 视为缺失，瞬时 `OSError` 重试，持久错误传播——绝不把「读不到」当「不存在」覆盖）。Key 值拒绝嵌入 `\n`/`\r`。
+- `format_converter/providers.py`：`get_api_key` 现在先读环境变量、缺失时回退 `.env`（每次调用重新读取，无缓存）；`MissingApiKeyError` 消息逐字不变。
+- `format_converter/jobs.py`：`_sanitize_message` 同时屏蔽环境变量与 `.env` 的 Key 值。
+- `format_converter/web_server.py`：启动时生成仅内存会话令牌（`secrets.token_urlsafe(32)`）；`GET /api/ai/key-status`、`POST /api/ai/key`、`DELETE /api/ai/key`；`_auth_ok` 校验回环 `Host` + 回环 `Origin` + 令牌（`compare_digest`），缺失/非法 403；`_is_loopback_host`/`_is_loopback_origin` 拒绝 userinfo/路径/畸形端口；服务 `index.html` 时注入令牌并带 `Cache-Control: no-store`；`do_DELETE` 路由。响应一律不泄 Key。
+- `format_converter/web/static/index.html` / `app.js` / `styles.css`：AI 卡片新增「OrcaRouter API 配置」（密码输入 + 保存/清除/重新检测 + 状态/来源 + 指定文案）；前端不持久化、不 `console.log` Key、请求后立即清空输入；清除按钮按来源显隐（none 隐藏；environment 下仍可清除 `.env` 备用 Key，仅影响 `.env`）。
+- `.env.example`（新增，仅占位 `your_api_key_here`）；`.gitignore` 增加 `.env.*.tmp`；`__version__` → `0.2.1`；`conftest.py` 增加 autouse `_isolate_dotenv` fixture（把 `.env` 指到每测试临时路径，杜绝真实 `.env` 干扰）。
+- 测试：`tests/test_env_store.py`（新增）、`tests/test_providers.py`、`tests/test_web_server.py`（`TestKeyConfigEndpoints`）、`tests/test_web_ui.py`、`tests/test_security_invariants.py`（`env_store.py` 入 CORE_MODULES、`_KEY_ASSIGN_RE` 加未引号匹配、新增 `.env`/`.env.example` 跟踪断言）。
+
+### 测试证据
+- 最终门禁：`pytest` → **254 passed**（198 + 56）；无 `ORCAROUTER_API_KEY` 环境重跑 → **254 passed**；`compileall -q .` → 0；`git diff --check` → 通过（仅 autocrlf 提示）；`node --check app.js` → 通过；`git grep 'sk-<12+ alnum>'` 无命中；`.env` 被 git 忽略且未跟踪，`.env.example` 仅占位值。
+
+### 审查结论
+- **main 代理审阅**（逐文件 diff + 亲测）：发现并修复 3 项——
+  - **P1** `DELETE /api/ai/key` 偶发 500：Windows 上 `os.replace` 被杀软/索引瞬时锁（`PermissionError`）→ `_atomic_write` 对 `PermissionError` 有界重试（5 次 × 20ms）；复测全量两次 254 通过、不再复现。
+  - **P2** `dotenv_path()` 结果假设为 `Path`（str 会崩）→ 三处 `Path(dotenv_path())` 强转。
+  - **P2** 「清除本地 Key」在 environment 来源下被隐藏，与规格权限矩阵不符 → 改为显示（environment 下仍只清 `.env`、绝不动环境变量）。
+- **独立安全审查**（对抗式，独立运行复现）：**无 P0/P1**，P2×2 + P3×2 → 结论 CONDITIONAL PASS。
+  - **P2-1** 并发写/删可能把「读 OSError」误当「文件缺失」而丢其它行 → 修复：`_read_raw` 仅 `FileNotFoundError` 视为缺失 + 瞬时读锁重试 + `_ENV_LOCK` 串行化读写改。
+  - **P2-2** POST 接受含换行的 Key 会破坏 `.env` 布局（残留半个行）→ 修复：Web 层 400 + `write_env_key` `ValueError`。
+  - **P3-1** `Host`/`Origin` 接受 userinfo/路径/畸形端口 → 修复：两项解析函数拒绝之（`parts.port` 校验、userinfo/path/query 检查）。
+  - **P3-2** 「清除本地 Key」不清空密码输入框 → 修复：`clearKey` 请求后清空。
+- **独立复审**（复审代理独立复现全部 4 项修复 + 回归）：**PASS**，四项均确认修复、无新缺陷。
+- 修复后全量 **254 passed**（含无 Key 环境重跑）、`compileall` 0、`git diff --check` 通过、工作树干净。
+
+### 修复记录（2026-09-01，提交 `f5204c3`）
+main 代理审阅 + 独立安全审查 + 独立复审确认的修复，全部包含在该提交：
+- **P1** `DELETE /api/ai/key` 偶发 500：`os.replace` 被 Windows 杀软/索引瞬时锁（`PermissionError`）→ `_atomic_write` 对 `PermissionError` 有界重试（5 次 × 20ms），持久错误仍传播、原文件不损坏。
+- **P2** 并发写/删丢行：`write_env_key` 原把任意读 `OSError` 当「文件缺失」→ `_read_raw` 仅 `FileNotFoundError` 返回缺失、瞬时读锁重试、持久错误传播；`_ENV_LOCK`（模块级 `RLock`）串行化 `write_env_key`/`delete_env_key` 的读-改-写。
+- **P2** 换行注入破坏 `.env`：Web 层拒绝含 `\n`/`\r` 的 Key（400）；`write_env_key` 同样 `ValueError`。
+- **P3** `Host`/`Origin` 形近绕过：`_is_loopback_host`/`_is_loopback_origin` 拒绝 userinfo、路径、query/fragment、畸形端口。
+- **P2** UI 权限矩阵：environment 来源下「清除本地 Key」由隐藏改为显示（仍只清 `.env`、绝不动环境变量）；`clearKey` 请求后清空密码输入框。
+- 补回归测试：换行拒绝、瞬时读重试、持久读不覆盖、`Host`/`Origin` 收紧用例（`tests/test_env_store.py`、`tests/test_web_server.py`）。
+
+### 注意事项
+- 未 push、未打 tag、未建 Release、未改写历史。
+- 「会话令牌不落盘、服务停止即失效」；令牌不是 API Key，仅用于阻止其它网页对 localhost 的未授权写/删。
+- `.env` 为明文本地配置，仅适用于本机个人使用；`.env.example` 是唯一入库的模板（占位值）。

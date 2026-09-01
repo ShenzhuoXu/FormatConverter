@@ -5,6 +5,23 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] - 2026-09-01
+
+### 新增
+
+- Web UI「AI 校对」卡片新增「OrcaRouter API 配置」区域：显示 Key 状态（已配置 / 未配置）与来源（系统环境变量 / 本地 `.env` / 未配置），可把 API Key 保存到本机项目根目录 `.env`、清除本地 Key、重新检测；页面明确说明 Key 仅保存在本机 `.env`、不保存到浏览器，且执行 AI 校对时后端会真实调用 OrcaRouter。
+- API Key 来源优先级固定为：系统环境变量 `ORCAROUTER_API_KEY` > 项目根目录 `.env` > 未配置。环境变量缺失时，AI 任务每次执行都会重新读取 `.env`（CLI `ai-clean` 与 Web AI 任务均适用）。
+- 新的本地 Web API：`GET /api/ai/key-status`、`POST /api/ai/key`、`DELETE /api/ai/key`。写入/删除接口校验服务启动时生成的**仅内存会话令牌**（`secrets.token_urlsafe(32)`，服务停止即失效、绝不落盘）与回环 `Host`/`Origin`；任何缺失或不合法即拒绝。令牌经服务端注入到所服务的 `index.html`（静态文件仅含占位符），响应带 `Cache-Control: no-store`。
+- 新增 `format_converter/env_store.py`：严格的本地 `.env` 解析（不使用 python-dotenv），只更新/删除 `ORCAROUTER_API_KEY`，其它内容（含注释、空行、非 UTF-8 字节）逐字保留；采用「临时文件 + 原子 replace」写入，失败不损坏原文件；并发写入/删除经锁串行化。
+- 新增 `.env.example`（仅占位值 `your_api_key_here`）；`.env` 继续被 `.gitignore` 忽略。
+
+### 安全强化
+
+- 写入/删除接口的 `Host`/`Origin` 校验拒绝 userinfo、路径、畸形端口等形近绕过。
+- API Key 值拒绝嵌入换行（`\n`/`\r`），避免破坏 `.env` 布局。
+- `.env` 读写在 Windows 上对瞬时文件锁（杀软/索引扫描）自动重试，不再把「读不到」误判为「文件不存在」而覆盖其它配置。
+- `jobs._sanitize_message` 同时屏蔽环境变量与 `.env` 中的 Key 值（防御性兜底）。
+
 ## [0.2.0] - 2026-08-31
 
 ### 新增

@@ -18,9 +18,11 @@ FormatConverter/
     providers.py         # AI Provider 预设（可选功能）
     llm_client.py        # OpenAI-compatible 客户端封装（可选功能）
     ai_cleaner.py        # Markdown 分块 + AI 校对编排（可选功能）
+    env_store.py         # 项目根 .env 的严格本地解析（ORCAROUTER_API_KEY）
     web_server.py        # 本机 Web 服务（仅监听 127.0.0.1）
     web/static/          # 单页图形界面（index.html / app.js / styles.css）
   tests/                 # 自动化测试（离线运行）
+  .env.example           # .env 参考模板（仅占位值）
   启动图形界面.bat       # Windows 一键启动脚本（双击运行）
   打开我.html            # 服务未启动时的说明页
   main.py                # 本地运行入口
@@ -60,7 +62,7 @@ python -m format_converter.web_server
 - **① PDF 转 Markdown**：上传一个 `.pdf` 文件，下载转换结果（ZIP）。
 - **② Markdown 清理**：上传一个 `.md` 文件，下载清理结果（ZIP）。
 - **③ 转换后清理流水线**：上传一个 `.pdf` 文件，一次完成「转换 + 清理」，下载结果（ZIP）。
-- **④ AI 校对**：上传单个 `.md` 文件并填写模型名，下载校对结果（ZIP）。
+- **④ AI 校对**：上传单个 `.md` 文件并填写模型名，下载校对结果（ZIP）。卡片内还提供「OrcaRouter API 配置」区域，可查看 Key 状态/来源、把 Key 保存到本机 `.env`、清除本地 Key 或重新检测。
 
 > **停止方式**：在命令行服务窗口按 **Ctrl+C**，窗口会打印「收到 Ctrl+C，正在停止服务...」后退出，下次可重新双击启动。**保持该窗口前台运行**：它就是服务进程本体，关闭或 Ctrl+C 即停止服务。
 
@@ -153,14 +155,22 @@ python -m format_converter.web_server
 
 > ⚠️ **网络与费用**：`ai-clean` 会把文件内容分块发送到你选择的第三方 AI 服务（第一版仅支持 OrcaRouter）。这是真实的网络请求，**可能产生费用，费用由你自己的 OrcaRouter 账户承担**。请确认内容适合发送到第三方后再使用。`convert`、`clean`、`pipeline` 以及 Web UI 的其它三张卡片都不会触发 AI。
 
-- **Key 只从环境变量读取**：API Key 只从命令行所在进程 / 服务进程的环境变量 `ORCAROUTER_API_KEY` 读取，**不支持**作为命令行参数或页面输入传入，也**不会**写入任何项目文件、日志或异常信息，**不会**出现在网页里。
-- **配置方法（PowerShell）**：在启动服务 / 运行命令的**同一个终端**里先设置环境变量，再启动：
+- **Key 来源优先级（固定）**：① 系统/进程环境变量 `ORCAROUTER_API_KEY`；② 项目根目录 `.env` 文件的 `ORCAROUTER_API_KEY`；③ 未配置。环境变量未设置时，每次执行都会重新读取 `.env`（无需重启服务）。API Key **不支持**作为命令行参数传入，也**不会**写入日志、异常信息或 git 跟踪文件。
+- **配置方法一（环境变量，PowerShell）**：在启动服务 / 运行命令的**同一个终端**里先设置环境变量，再启动：
 
 ```powershell
 $env:ORCAROUTER_API_KEY = "你的-key"
 ```
 
-- **缺失时的表现**：未设置（或为空白）时，`ai-clean` 会在任何网络请求之前报错并退出。命令行错误消息为 `error: Missing API key for provider 'orcarouter'. Set the ORCAROUTER_API_KEY environment variable and try again.`（返回码 1）；Web UI 的「AI 校对」卡片会显示对应的失败提示。
+- **配置方法二（项目根目录 `.env`）**：在 Web UI 的「AI 校对」卡片「OrcaRouter API 配置」区域粘贴 Key 并点「保存到本地」，或手动在项目根目录创建 `.env`：
+
+```text
+ORCAROUTER_API_KEY=你的-key
+```
+
+  `.env` 是**明文配置文件**（不是加密保险箱），已被 `.gitignore` 忽略、不会被提交，只适用于本机个人使用场景。参考模板见 `.env.example`（仅占位值）。
+- **`.env` 与网页的隐私边界**：页面只把 Key 通过本机回环请求保存到项目根目录 `.env`，**不会**写入浏览器存储（无 Cookie / localStorage 等）；但**不宣称 Key 不会联网**——执行 AI 校对时，Python 后端会用该 Key 真实调用 OrcaRouter。写入/删除接口需验证服务启动时生成的仅内存会话令牌与回环 Host/Origin，防止其它网页对 localhost 发起未授权操作。
+- **缺失时的表现**：环境变量与 `.env` 均未设置（或为空白）时，`ai-clean` 会在任何网络请求之前报错并退出。命令行错误消息为 `error: Missing API key for provider 'orcarouter'. Set the ORCAROUTER_API_KEY environment variable and try again.`（返回码 1）；Web UI 的「AI 校对」卡片会显示对应的失败提示。
 - 在 [OrcaRouter](https://www.orcarouter.ai/) 注册并获取 API Key（维护者可把该链接替换为自己的注册链接）。
 
 ### 用法
@@ -184,7 +194,7 @@ $env:ORCAROUTER_API_KEY = "你的-key"
 要点：
 
 - `--file`、`--provider`、`--model` 必填；第一版 `--provider` 只接受 `orcarouter`。
-- API Key 只从环境变量 `ORCAROUTER_API_KEY` 读取，不支持作为命令行参数传入。
+- API Key 按「环境变量 `ORCAROUTER_API_KEY` > 项目根目录 `.env`」的优先级读取，不支持作为命令行参数传入。
 - 原文件绝不会被覆盖；即使 `--output` 指向原文件，也必须加 `--overwrite` 才会继续。
 - 只处理单一 `.md` 文件，不做目录批量处理。
 - 请确认你要用的模型名在 OrcaRouter 上可用。
@@ -217,7 +227,7 @@ $env:ORCAROUTER_API_KEY = "你的-key"
 
 ### AI 缺 Key 报错
 
-未设置环境变量 `ORCAROUTER_API_KEY` 时运行 `ai-clean`：命令行报错并返回码 1；Web UI 的「AI 校对」卡片显示失败提示。不会发起任何网络请求。设置方法见「AI 校对 → 隐私、费用与 Key 配置」。
+环境变量 `ORCAROUTER_API_KEY` 与项目根目录 `.env` 均未设置时运行 `ai-clean`：命令行报错并返回码 1；Web UI 的「AI 校对」卡片显示失败提示。不会发起任何网络请求。设置方法见「AI 校对 → 隐私、费用与 Key 配置」。
 
 ### 非 UTF-8 文件报错
 
