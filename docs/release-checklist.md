@@ -23,7 +23,7 @@
 - [ ] `ORCAROUTER_API_KEY` 仅以**变量名**形式出现在文档 / 错误消息中，项目文件中无真实 Key 值。
 - [ ] Web API 任何响应（status / save / delete / 400 / 403 / 500）均不包含 Key、掩码、长度或可推断信息（`tests/test_web_server.py::TestKeyConfigEndpoints::test_no_key_material_in_any_response` 覆盖）。
 
-## 3. 无临时文件 / 无 .idea / 无 .env
+## 3. 无临时文件 / 无 .idea；`.env` 允许存在但必须被忽略且不跟踪
 
 - [ ] `git ls-files | grep -iE '\.env$|\.env\.[0-9a-zA-Z]*\.tmp|\.idea|\.pytest-tmp|__pycache__|\.pytest_cache'` → 无命中（`.env.example` 例外，应被跟踪且仅占位值）。
 - [ ] `git status --short` 仅包含预期发布文件：
@@ -31,8 +31,9 @@
   - `.env.example`（新增，仅占位值）、`.gitignore`（新增 `.env.*.tmp`）、`format_converter/__init__.py`（版本号 → 0.2.1）；
   - `format_converter/env_store.py`（新增）、`web_server.py`、`providers.py`、`jobs.py`、`web/static/`（index.html / app.js / styles.css）、`conftest.py`；
   - `tests/`（test_env_store.py 新增；test_providers / test_web_server / test_web_ui / test_security_invariants 修改）。
-- [ ] `git check-ignore .env` → 命中（`.env` 文件已被忽略，即使出现也不会被跟踪）。
-- [ ] 磁盘上不存在 `.env` 文件：`ls -la .env` → 不存在。
+- [ ] `git check-ignore .env` → 命中（`.env` 即使存在也不会被跟踪）。
+- [ ] **`.env` 允许存在于项目根目录**（v0.2.1 的正式功能允许用户通过网页或手工方式保存本机 Key）；但必须同时满足：未被 Git 跟踪、被 `.gitignore` 忽略、不进入任何 ZIP / 日志 / 异常 / API 响应 / 任务目录 / 文档 / 前端存储。
+- [ ] `.env.example` 已跟踪，其中的 Key 值仅为占位符 `your_api_key_here`（安全不变量测试 `tests/test_security_invariants.py::TestDotEnvTracking` 覆盖）。
 - [ ] `.pytest-tmp` 已在测试后删除；`__pycache__` / `.pytest_cache` 未被 git 跟踪。
 
 ## 4. 无绝对用户路径
