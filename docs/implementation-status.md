@@ -455,3 +455,30 @@ main 代理审阅 + 独立安全审查 + 独立复审确认的修复，全部包
 ### 注意事项
 - 未 push、未 tag、未建 Release、未改写历史；未使用真实 API Key；未引入外部资源；未引入浏览器持久化存储。
 - 验收命令中 `rg` 在 PowerShell 不可用（非项目问题），改用等价 ripgrep（Grep 工具）核对；README/docs/CHANGELOG 中出现的 `https://` 均为回环地址或官方链接，`下载 ZIP`/`files[0]` 仅出现在测试断言与历史记录中（均明确标注）。
+
+## Step 4.1 — 修复任务进度丢失 + AI 模型记忆与连接测试
+
+### 状态：✅ 验收通过（2026-09-02）
+
+### 范围
+- 修复 P1 任务进度丢失：切换模式 / 刷新页面后仍能从当前服务进程找回最近任务；新增 AI 模型名本地记忆（gitignored 本地 JSON，不存 Key）与 AI 连接测试（极小真实请求）。未改 CLI 行为、未引入新依赖、未使用真实 API Key、未削弱 Key/.env/会话令牌安全逻辑、未使用浏览器持久化存储。
+
+### 提交
+- `309d83a` `fix: preserve web job progress and add AI utilities`（14 文件，+1362/−63）
+
+### 改动内容
+- `format_converter/jobs.py`：`JobResult` 增加 `job_type` / `created_at` / `updated_at`（带默认值，`get()` 兼容不变）；`_store` 记录首次（queued）时间戳并每次状态变更刷新 `updated_at`；新增只读 `list_recent(limit=20)`——按 `updated_at` 倒序返回轻量 dict（`job_id`/`job_type`/`status`/`message`/`created_at`/`updated_at`），**不含 `output_paths`**。
+- `format_converter/web_server.py`：新增 `GET /api/jobs`（最近任务，message 逐个经 `_sanitize_message` 脱敏，响应无绝对路径 / 无 `output_paths` / 无 Key）；`_send_job_status` 增补 `job_type`/`created_at`/`updated_at`（`output_paths` 仍不返回）；新增模型端点 `GET/POST/DELETE /api/ai/models`（写接口复用 `_auth_ok`：会话令牌 + 回环 Host/Origin，缺失 403；校验空名 / 超长 / 换行 / 上限 50）；新增 `POST /api/ai/connection-test`（`_auth_ok`，仅 orcarouter，`get_api_key` + `OpenAICompatClient` 构造客户端，极小 prompt `system="Reply with OK."` / `user="OK"`，成功 `{"ok": true}`，失败映射为脱敏中文错误，HTTP 仍 200 + `ok:false`；缺 Key → `{"ok": false, "error": "未配置 API Key。"}`）。新增 `_read_small_json_body` 复用 body 读取。
+- `format_converter/model_store.py`（新增）：`list_models` / `add_model` / `delete_model` / `validate_model`，读写项目根目录 gitignored 的 `.formatconverter-models.json`（`{"models": [...]}`）；校验 trim 非空、长度 ≤200、禁 CR/LF、上限 50；去重大小写敏感、完全相同去重；原子写（临时文件 + `os.replace`，Windows 瞬时锁重试）；模块锁串行化并发写删；**只存模型名，绝不存 API Key**。
+- `format_converter/web/static/app.js`：**移除 `currentJobId` 全局变量**（setMode 不再清空导致轮询中断）；新增 `appState.jobs` + `polling` 映射，轮询按 job 独立追踪、模式切换不清空；页面加载 `GET /api/jobs` 恢复最近任务（运行中任务自动续轮询）；「最近任务」区渲染类型中文名 / 状态（排队/处理中/成功/失败）/ 更新时间 / 成功任务「下载结果」链接 / 失败任务脱敏 message；AI 模型输入改为 `<datalist>` 组合输入 + 保存 / 删除 / 测试连接按钮（写与测均带 `X-FC-Session-Token` 头），提交 AI 任务时自动记住模型名；连接测试结果显示「连接正常」或脱敏错误；保留全部 Step 4 行为（多文件、校验、`uploads`、AI Key 区不退化、`input.value = ""`）。
+- `format_converter/web/static/index.html` / `styles.css`：新增 `#recent-jobs-section`（`#job-list` / `#job-list-empty` / `#refresh-jobs-btn`）；`#model-field` 增加 datalist、保存/删除/测试连接按钮、`#model-message` / `#test-connection-status`、明确文案「连接测试会向 OrcaRouter 发起真实网络请求，可能产生费用」；新增任务行 / 模型反馈样式。
+- 测试：`tests/test_jobs.py`（16 → 20，`TestListRecent` 4 条）、`tests/test_web_server.py`（68 → 82，`TestRecentJobs` 3 + `TestModelStore` 5 + `TestConnectionTest` 5，并把 `GET /api/jobs` 从 404 断言移除）、`tests/test_web_ui.py`（21 → 26，`TestStep41Frontend` 5 条静态断言）、`conftest.py` 新增 autouse `_isolate_model_store`（把 `models_path()` 指到每测试临时路径）。
+- 文档 / 配置：`.gitignore` 增加 `.formatconverter-models.json`（及原子写临时文件）；`CHANGELOG.md`（[Unreleased] 增 1 修复 + 2 新增）；`README.md`（最近任务说明 + 模型记忆/连接测试最小事实更新）；`docs/verification-checklist.md`（新增 Step 4.1 手工验收项）。
+
+### 测试证据
+- `pytest tests/test_jobs.py` → **20 passed**；`pytest tests/test_web_server.py` → **82 passed**；`pytest tests/test_web_ui.py` → **26 passed**；全量 `pytest` → **309 passed**（286 + 23）；`compileall -q .` → 0；`node --check app.js` → 通过；`git diff --check` → 通过（仅 autocrlf 提示）；连接测试全程 fake client / 无真实网络；无 Key 泄漏（缺 Key / 各错误分支响应均无 `sk-`）；所有测试临时目录已删除；`git status --short` 提交后为空。
+- 连接测试 / 模型写接口均需会话令牌 + 回环 Host/Origin（403 覆盖）；Web 仍只绑定 `127.0.0.1`、无 CORS；`GET /api/jobs` / `connection-test` / 模型响应均不含绝对路径、`output_paths`、API Key。
+
+### 注意事项
+- 未 push、未 tag、未建 Release、未改写历史；未使用真实 API Key；未引入外部资源 / 浏览器持久化存储 / 新依赖；CLI 行为零改动。
+- 「最近任务」只反映当前服务进程；服务重启后旧任务可消失（输出在临时目录中，符合预期）。`rg` 在 PowerShell 不可用，改用等价 ripgrep 核对；全仓无真实 Key 形状，`ORCAROUTER_API_KEY` 赋值仅 `sk-test-*` 测试假值与占位符。
