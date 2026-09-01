@@ -64,6 +64,26 @@ def _post_job(port: int, job_type: str, params: dict, filename: str, content: st
                     headers={"Content-Type": "application/json"})
 
 
+def _post_jobs(port: int, job_type: str, params: dict,
+               files: list[tuple[str, str]]) -> tuple[int, dict[str, str], bytes]:
+    """Submit a multi-file job via the ``uploads`` array field."""
+    payload = {
+        "job_type": job_type,
+        "params": params,
+        "uploads": [{"filename": name, "data_b64": _b64(content)}
+                    for name, content in files],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    return _request(port, "POST", "/api/jobs", body=body,
+                    headers={"Content-Type": "application/json"})
+
+
+def _post_raw(port: int, payload: dict) -> int:
+    body = json.dumps(payload).encode("utf-8")
+    return _request(port, "POST", "/api/jobs", body=body,
+                    headers={"Content-Type": "application/json"})[0]
+
+
 def _wait_terminal(port: int, job_id: str, timeout: float = 15.0) -> dict:
     deadline = time.monotonic() + timeout
     while True:
@@ -106,6 +126,38 @@ def _fake_ai_clean(file, provider: str, model: str, *, output=None,
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("# ai cleaned", encoding="utf-8")
     return output
+
+
+def _fake_convert_directory(input_dir, output_dir, overwrite: bool = False) -> list[Path]:
+    """Stand-in for convert_pdf_directory that fakes one .md per input .pdf."""
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    converted: list[Path] = []
+    for pdf in sorted(input_dir.glob("*.pdf")):
+        out = output_dir / f"{pdf.stem}.md"
+        out.write_text("# converted", encoding="utf-8")
+        converted.append(out)
+    return converted
+
+
+def _fake_run_pipeline_batch(pdf_dir, md_dir, overwrite: bool = False,
+                             keep_lists: bool = True, dedupe: bool = True,
+                             backup: bool = True) -> tuple[list[Path], list[Path]]:
+    """Stand-in for run_pipeline that fakes output for every input .pdf."""
+    pdf_dir = Path(pdf_dir)
+    md_dir = Path(md_dir)
+    md_dir.mkdir(parents=True, exist_ok=True)
+    converted: list[Path] = []
+    cleaned: list[Path] = []
+    for pdf in sorted(pdf_dir.glob("*.pdf")):
+        out = md_dir / f"{pdf.stem}.md"
+        out.write_text("# pipelined", encoding="utf-8")
+        converted.append(out)
+        cln = md_dir / f"{pdf.stem}.cleaned.md"
+        cln.write_text("# cleaned", encoding="utf-8")
+        cleaned.append(cln)
+    return converted, cleaned
 
 
 @pytest.fixture
@@ -396,6 +448,129 @@ class TestAdditionalE2E:
         assert extracted.count("Alpha.") == 1  # dedupe still ran (default True)
 
 
+class TestMultiUpload:
+    def test_batch_clean_success_e2e(self, make_server) -> None:
+        server, port = make_server()
+        files = [
+            ("a.md", "# A\n\nAlpha.\n\nAlpha.\n\nBeta.\n"),
+            ("b.md", "# B\n\nGamma.\n\nGamma.\n\nDelta.\n"),
+        ]
+        status, _, data = _post_jobs(port, "clean", {"dedupe": True, "backup": True}, files)
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        assert headers["Content-Type"] == "application/zip"
+        assert "Access-Control-Allow-Origin" not in headers
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = sorted(archive.namelist())
+            assert names == ["input/a.md", "input/b.md"]
+            a = archive.read("input/a.md").decode("utf-8")
+            b = archive.read("input/b.md").decode("utf-8")
+        assert a.count("Alpha.") == 1  # dedupe ran per file
+        assert b.count("Gamma.") == 1
+        # No absolute server path may leak in any response body.
+        assert str(server.base_temp_dir).encode() not in data
+        assert str(server.base_temp_dir) not in json.dumps(final)
+
+    def test_batch_convert_success_e2e(self, make_server, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "format_converter.jobs.convert_pdf_directory", _fake_convert_directory
+        )
+        server, port = make_server()
+        files = [("a.pdf", "%%PDF-a"), ("b.pdf", "%%PDF-b")]
+        status, _, data = _post_jobs(port, "convert", {}, files)
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+
+        # Directory mode: both PDFs landed in the job's input dir.
+        job_dir = server.base_temp_dir / job_id
+        assert sorted(p.name for p in (job_dir / "input").glob("*.pdf")) == ["a.pdf", "b.pdf"]
+
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            assert sorted(archive.namelist()) == ["output/a.md", "output/b.md"]
+        assert str(server.base_temp_dir).encode() not in data
+
+    def test_batch_pipeline_success_e2e(self, make_server, monkeypatch) -> None:
+        captured: dict[str, Path] = {}
+
+        def _spy_pipeline(pdf_dir, md_dir, **kwargs):
+            captured["pdf_dir"] = Path(pdf_dir)
+            captured["md_dir"] = Path(md_dir)
+            return _fake_run_pipeline_batch(pdf_dir, md_dir)
+
+        monkeypatch.setattr("format_converter.jobs.run_pipeline", _spy_pipeline)
+        server, port = make_server()
+        files = [("a.pdf", "%%PDF-a"), ("b.pdf", "%%PDF-b")]
+        status, _, data = _post_jobs(port, "pipeline", {}, files)
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+        # run_pipeline received an input dir holding both uploaded PDFs.
+        assert sorted(p.name for p in captured["pdf_dir"].glob("*.pdf")) == ["a.pdf", "b.pdf"]
+
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = archive.namelist()
+            assert "output/a.md" in names
+            assert "output/b.md" in names
+        assert str(server.base_temp_dir).encode() not in data
+
+    def test_batch_ai_clean_success_e2e(self, make_server, monkeypatch) -> None:
+        calls: list[str] = []
+
+        def _recording_ai_clean(file, provider: str, model: str, *, output=None,
+                               overwrite: bool = False, client=None) -> Path:
+            output = Path(output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("# ai cleaned", encoding="utf-8")
+            calls.append(Path(file).name)
+            return output
+
+        monkeypatch.setattr("format_converter.jobs.ai_clean", _recording_ai_clean)
+        server, port = make_server()
+        files = [("a.md", "# A"), ("b.md", "# B")]
+        status, _, data = _post_jobs(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"}, files
+        )
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+        assert sorted(calls) == ["a.md", "b.md"]  # called once per uploaded file
+
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            assert sorted(archive.namelist()) == ["output/a.ai.md", "output/b.ai.md"]
+        # No API key material or absolute path leaks anywhere.
+        assert b"sk-" not in data
+        assert "sk-" not in json.dumps(final)
+        assert str(server.base_temp_dir).encode() not in data
+
+    def test_single_upload_field_still_works(self, make_server, monkeypatch) -> None:
+        # Legacy single 'upload' field must remain a valid way to submit a job.
+        monkeypatch.setattr("format_converter.jobs.convert_pdf_file", _fake_convert_file)
+        server, port = make_server()
+        status, _, data = _post_job(port, "convert", {}, "doc.pdf", "%%PDF fake")
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+        assert _wait_terminal(port, job_id)["status"] == "succeeded"
+
+
 class TestOversizedBody:
     def test_oversized_request_body_413(self, make_server) -> None:
         server, port = make_server()
@@ -490,6 +665,75 @@ class TestValidation:
         payload = {"job_type": "clean", "params": ["not", "a", "dict"],
                    "upload": {"filename": "a.md", "data_b64": _b64("# x")}}
         assert _request(port, "POST", "/api/jobs", body=json.dumps(payload).encode())[0] == 400
+
+
+class TestMultiUploadValidation:
+    def test_empty_uploads_array_400(self, make_server) -> None:
+        server, port = make_server()
+        assert _post_raw(port, {"job_type": "clean", "params": {}, "uploads": []}) == 400
+
+    def test_uploads_not_array_400(self, make_server) -> None:
+        server, port = make_server()
+        assert _post_raw(
+            port, {"job_type": "clean", "params": {}, "uploads": "not-an-array"}
+        ) == 400
+
+    def test_both_upload_and_uploads_400(self, make_server) -> None:
+        server, port = make_server()
+        payload = {
+            "job_type": "clean", "params": {},
+            "upload": {"filename": "a.md", "data_b64": _b64("# x")},
+            "uploads": [{"filename": "b.md", "data_b64": _b64("# y")}],
+        }
+        assert _post_raw(port, payload) == 400
+
+    def test_duplicate_filenames_case_insensitive_400(self, make_server) -> None:
+        server, port = make_server()
+        files = [("A.md", "# x"), ("a.md", "# y")]
+        assert _post_jobs(port, "clean", {}, files)[0] == 400
+
+    def test_dangerous_filename_in_uploads_400(self, make_server) -> None:
+        server, port = make_server()
+        for bad in ["../evil.md", "a/b.md", "a\\b.md", "..", "."]:
+            files = [("a.md", "# x"), (bad, "# y")]
+            status, _, _ = _post_jobs(port, "clean", {}, files)
+            assert status == 400, f"filename {bad!r} should be rejected"
+
+    def test_mixed_wrong_extensions_400(self, make_server) -> None:
+        server, port = make_server()
+        # convert only accepts .pdf; a stray .md must reject the whole batch.
+        files = [("a.pdf", "%%PDF"), ("b.md", "# x")]
+        assert _post_jobs(port, "convert", {}, files)[0] == 400
+
+    def test_invalid_base64_in_uploads_400(self, make_server) -> None:
+        server, port = make_server()
+        payload = {
+            "job_type": "clean", "params": {},
+            "uploads": [
+                {"filename": "a.md", "data_b64": _b64("# ok")},
+                {"filename": "b.md", "data_b64": "%%%not-base64%%%"},
+            ],
+        }
+        assert _post_raw(port, payload) == 400
+
+    def test_too_many_files_400(self, make_server) -> None:
+        from format_converter.web_server import MAX_UPLOAD_FILES
+        server, port = make_server()
+        files = [(f"{i}.md", "# x") for i in range(MAX_UPLOAD_FILES + 1)]
+        assert _post_jobs(port, "clean", {}, files)[0] == 400
+
+    def test_invalid_file_creates_no_job_dir(self, make_server) -> None:
+        server, port = make_server()
+        base = server.base_temp_dir
+        assert base is not None
+        before = {p.name for p in base.iterdir()}
+        # One valid + one unsafe filename: the whole request must fail cleanly
+        # without leaving a partial job directory on disk.
+        files = [("a.md", "# ok"), ("../evil.md", "# bad")]
+        status, _, _ = _post_jobs(port, "clean", {}, files)
+        assert status == 400
+        after = {p.name for p in base.iterdir()}
+        assert after == before
 
 
 # ---------------------------------------------------------------------------

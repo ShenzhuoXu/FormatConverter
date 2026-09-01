@@ -213,6 +213,32 @@ class TestAIClean:
         assert result.output_paths == (out.resolve(),)
         assert "AI proofread" in result.message
 
+    def test_directory_batch_success_offline(self, tmp_path: Path) -> None:
+        # Web batch mode: input_dir + output_dir proofreads every .md, one
+        # output per file. Uses an injected client so no real key is needed.
+        md_dir = tmp_path / "mds"
+        md_dir.mkdir()
+        _write_md(md_dir / "a.md", content="Alpha.\n\nBeta.")
+        _write_md(md_dir / "b.md", content="Gamma.\n\nDelta.")
+        out_dir = tmp_path / "out"
+
+        manager = JobManager()
+        job_id = manager.submit(
+            "ai-clean",
+            {"input_dir": md_dir, "output_dir": out_dir,
+             "provider": "orcarouter", "model": "m1", "client": EchoClient()},
+        )
+        result = manager.wait(job_id, timeout=10)
+
+        assert result is not None
+        assert result.status is JobStatus.succeeded
+        assert result.message == "AI proofread 2 Markdown file(s)."
+        assert len(result.output_paths) == 2
+        assert (out_dir / "a.ai.md").is_file()
+        assert (out_dir / "b.ai.md").is_file()
+        assert (out_dir / "a.ai.md").read_text(encoding="utf-8") == "[revised] Alpha.\n\nBeta."
+        assert (out_dir / "b.ai.md").read_text(encoding="utf-8") == "[revised] Gamma.\n\nDelta."
+
 
 class TestSanitization:
     def test_failed_message_masks_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:

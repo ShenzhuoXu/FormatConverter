@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- Web API 支持多文件上传：`POST /api/jobs` 现接受 `uploads` 数组字段（每项含 `filename` / `data_b64`），一次提交多个文件并按同一任务类型处理。`convert`/`clean`/`pipeline` 在多文件时切换为目录模式复用既有 worker；`ai-clean` 新增目录批量模式（遍历 `input_dir` 下 `.md`，逐个输出 `<stem>.ai.md`），单文件 CLI 契约不变。单次上传上限 50 个文件；同请求内文件名大小写不敏感去重；任一文件名/扩展名/base64 非法则整请求 400、不创建部分输出。旧单文件 `upload` 字段保持兼容（同时传 `upload` 与 `uploads` 返回 400）。
+
 ### 移除
 
 - 删除 5 个历史兼容脚本：`convert.py`、`convert2.py`、`clean_md.py`、`clean_md_keep_lists.py`、`join_paragraphs.py`。它们只是转发到 `format_converter.cli.main` 的薄包装（`join_paragraphs.py` 的能力是 `clean` 命令的子集），功能已完全由 `python main.py convert / marker / clean / pipeline` 与图形界面覆盖，且无任何代码、测试或启动脚本引用。当前入口统一为：图形界面（双击 `启动图形界面.bat`）、CLI（`python main.py ...`）、Web 服务（`python -m format_converter.web_server`）。

@@ -367,3 +367,33 @@ main 代理审阅 + 独立安全审查 + 独立复审确认的修复，全部包
 - 未 push、未打 tag、未建 Release、未改写历史。
 - 「会话令牌不落盘、服务停止即失效」；令牌不是 API Key，仅用于阻止其它网页对 localhost 的未授权写/删。
 - `.env` 为明文本地配置，仅适用于本机个人使用；`.env.example` 是唯一入库的模板（占位值）。
+
+## Step 2 — Web API 多文件上传
+
+### 状态：✅ 验收通过（2026-09-01）
+
+### 范围
+- 让本机 Web API 支持一次上传多个文件并按同一任务类型处理。本步只做 Web API 批量上传协议与后端处理能力，不改 UI、不改最终下载规则（单文件直下载 `.md` / 多文件根目录 ZIP 留到 Step 3）、不改 CLI 契约、不削弱 Key/.env/会话令牌安全逻辑、不引入新依赖。
+
+### 协议
+- 新增 `uploads` 数组字段（每项 `{filename, data_b64}`）；旧单文件 `upload` 字段保持兼容（内部归一化为单元素 `uploads`）。
+- 同时传 `upload` 与 `uploads` → 400；`uploads` 非非空数组 → 400；超过 `MAX_UPLOAD_FILES`（50）→ 400；单个请求总大小仍受 `MAX_BODY_BYTES` 限制。
+- 文件名沿用既有 `_safe_upload_filename`（非空、无 `/`/`\`、非 `.`/`..`）；同请求内文件名大小写不敏感去重（`A.md`/`a.md` → 400）。
+- 扩展名沿用 `_ALLOWED_EXTENSIONS`（convert/pipeline→`.pdf`，clean/ai-clean→`.md`）；任一文件非法或 base64 无效 → 整请求 400、不创建 job、不写临时文件。
+- 仍用 base64 JSON，未切换 multipart/form-data。
+
+### 改动内容
+- `format_converter/web_server.py`：新增 `MAX_UPLOAD_FILES = 50` 常量与 `_parse_uploads(payload)` 归一化函数；`_handle_submit` 改为「归一化 → 逐文件校验名/重复/扩展名 → 解码全部 base64（写盘前完成）→ `_prepare_job`」；`_prepare_job` 与 `_build_params` 改收 `uploads: list[tuple[str, bytes]]`——单文件保持原 `file` 参数（旧测试兼容），多文件切目录模式（convert/clean 传 `input_dir`/`output_dir`，pipeline 仍 `pdf_dir`/`md_dir`，ai-clean 传 `input_dir`/`output_dir`）。下载 ZIP 规则未改。
+- `format_converter/jobs.py`：`_handle_ai_clean` 新增目录批量分支——params 含 `input_dir`/`output_dir`（无 `file`）时遍历 `input_dir/*.md` 逐个调用 `ai_clean(..., output=output_dir/<stem>.ai.md)`，返回全部输出路径；单文件 `file` 分支逐字不变（CLI 契约不变）。`_handle_convert`/`_handle_clean`/`_handle_pipeline` 未改（已支持目录模式）。
+
+### 测试
+- `tests/test_web_server.py`（+15）：`TestMultiUpload`（批量 clean/convert/pipeline/ai-clean e2e + 单文件 `upload` 兼容）、`TestMultiUploadValidation`（空数组/非数组/同时传/重复名/危险名/混合扩展名/无效 base64/超限/不创建部分输出）。新增辅助 `_post_jobs`/`_post_raw` 与 `_fake_convert_directory`/`_fake_run_pipeline_batch`。
+- `tests/test_jobs.py`（+1）：`TestAIClean::test_directory_batch_success_offline`（注入 `EchoClient`，离线、无真实 Key，直测 `_handle_ai_clean` 目录模式）。
+
+### 测试证据
+- `pytest tests/test_web_server.py` → **60 passed**；`pytest tests/test_jobs.py` → **16 passed**；全量 `pytest` → **269 passed**（254 + 15）；`compileall -q .` → 0；`git diff --check` → 通过（仅 autocrlf 提示）；所有临时目录已删除；`git status --short` 仅含本步 4 文件。
+
+### 注意事项
+- 未 push、未 tag、未建 Release、未使用真实 API Key、未改 Step 3 下载规则、未做 UI 美化。
+- Web 仍只绑定 `127.0.0.1`；Key/.env/会话令牌安全逻辑未削弱（无 CORS、无 Key 落浏览器、写/删仍需令牌 + 回环校验）。
+- 旧 `upload` 单文件协议仍可用；`python main.py --help` 仍正常。

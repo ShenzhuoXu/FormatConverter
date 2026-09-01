@@ -181,16 +181,42 @@ def _handle_ai_clean(params: Mapping[str, object]) -> tuple[tuple[Path, ...], st
     # the ORCAROUTER_API_KEY environment variable internally. The raw key is
     # never passed through params/results/messages.
     client = params.get("client")
-    output_param = params.get("output")
-    output = ai_clean(
-        _as_path(params["file"]),
-        str(params["provider"]),
-        str(params["model"]),
-        output=_as_path(output_param) if output_param is not None else None,
-        overwrite=bool(params.get("overwrite", False)),
-        client=client,  # type: ignore[arg-type]
-    )
-    return (output,), f"AI proofread: {output}"
+    provider = str(params["provider"])
+    model = str(params["model"])
+    overwrite = bool(params.get("overwrite", False))
+
+    file = params.get("file")
+    if file is not None:
+        # Single-file mode (CLI contract): proofread exactly one file.
+        output_param = params.get("output")
+        output = ai_clean(
+            _as_path(file),
+            provider,
+            model,
+            output=_as_path(output_param) if output_param is not None else None,
+            overwrite=overwrite,
+            client=client,  # type: ignore[arg-type]
+        )
+        return (output,), f"AI proofread: {output}"
+
+    # Web batch mode: proofread every uploaded .md in input_dir into
+    # output_dir, one output per file (``<stem>.ai.md``). The CLI never
+    # produces these params, so this does not change any CLI behavior.
+    input_dir = _as_path(params["input_dir"])
+    output_dir = _as_path(params["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    outputs: list[Path] = []
+    for md_path in sorted(input_dir.glob("*.md")):
+        out = ai_clean(
+            md_path,
+            provider,
+            model,
+            output=output_dir / f"{md_path.stem}.ai.md",
+            overwrite=overwrite,
+            client=client,  # type: ignore[arg-type]
+        )
+        outputs.append(out)
+    return tuple(outputs), f"AI proofread {len(outputs)} Markdown file(s)."
 
 
 _JOB_HANDLERS: dict[str, Callable[[Mapping[str, object]], tuple[tuple[Path, ...], str]]] = {

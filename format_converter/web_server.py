@@ -76,6 +76,9 @@ MAX_BODY_BYTES = 256 * 1024 * 1024
 # Ceiling for the small JSON body of the API-key save endpoint.
 MAX_KEY_BODY_BYTES = 16 * 1024
 
+# Maximum number of files accepted in a single 'uploads' request.
+MAX_UPLOAD_FILES = 50
+
 # File extensions the web layer accepts per job type (matched lowercased).
 _ALLOWED_EXTENSIONS: dict[str, frozenset[str]] = {
     "convert": frozenset({".pdf"}),
@@ -210,6 +213,36 @@ def _safe_upload_filename(name: object) -> str | None:
     if name in (".", ".."):
         return None
     return name
+
+
+def _parse_uploads(payload: dict) -> list[dict]:
+    """Return the list of upload dicts from a submit payload.
+
+    Accepts either the legacy single-file ``upload`` object (normalized to a
+    one-element list) or the newer ``uploads`` array. Raises ``ValueError``
+    with a client-facing message when the shape is ambiguous or invalid; the
+    caller maps that to an HTTP 400 before any file is written to disk.
+    """
+    has_single = "upload" in payload
+    has_multi = "uploads" in payload
+    if has_single and has_multi:
+        raise ValueError("Provide either 'upload' or 'uploads', not both.")
+    if has_multi:
+        uploads = payload.get("uploads")
+        if not isinstance(uploads, list) or not uploads:
+            raise ValueError("'uploads' must be a non-empty array.")
+        if len(uploads) > MAX_UPLOAD_FILES:
+            raise ValueError("Too many files in a single request.")
+        for item in uploads:
+            if not isinstance(item, dict):
+                raise ValueError("Each 'uploads' entry must be an object.")
+        return uploads
+    if has_single:
+        upload = payload.get("upload")
+        if not isinstance(upload, dict):
+            raise ValueError("Missing upload.")
+        return [upload]
+    raise ValueError("Missing upload.")
 
 
 # ---------------------------------------------------------------------------
@@ -589,28 +622,46 @@ class JobWebServer:
         if not isinstance(params, dict):
             return self._send_json(handler, 400, {"error": "params must be a JSON object."})
 
-        upload = payload.get("upload")
-        if not isinstance(upload, dict):
-            return self._send_json(handler, 400, {"error": "Missing upload."})
-
-        filename = _safe_upload_filename(upload.get("filename"))
-        if filename is None:
-            return self._send_json(handler, 400, {"error": "Invalid or unsafe upload filename."})
-
-        data_b64 = upload.get("data_b64")
-        if not isinstance(data_b64, str) or not data_b64.strip():
-            return self._send_json(handler, 400, {"error": "Missing upload data."})
+        # Normalize the upload field(s) into a list of upload dicts, then
+        # validate every filename and decode every base64 blob *before* writing
+        # anything to disk: a single bad file rejects the whole request
+        # atomically, so no partial job directory is ever left behind.
         try:
-            data = base64.b64decode(data_b64)
-        except Exception:  # noqa: BLE001 - malformed base64
-            return self._send_json(handler, 400, {"error": "Invalid base64 upload data."})
-        if not data:
-            return self._send_json(handler, 400, {"error": "Empty upload."})
+            upload_dicts = _parse_uploads(payload)
+        except ValueError as exc:
+            return self._send_json(handler, 400, {"error": str(exc)})
 
-        if Path(filename).suffix.lower() not in _ALLOWED_EXTENSIONS.get(job_type, frozenset()):
-            return self._send_json(
-                handler, 400, {"error": "Unsupported file extension for this job type."}
-            )
+        allowed = _ALLOWED_EXTENSIONS.get(job_type, frozenset())
+        seen_names: set[str] = set()
+        uploads: list[tuple[str, bytes]] = []
+        for item in upload_dicts:
+            filename = _safe_upload_filename(item.get("filename"))
+            if filename is None:
+                return self._send_json(
+                    handler, 400, {"error": "Invalid or unsafe upload filename."}
+                )
+            lower = filename.lower()
+            if lower in seen_names:
+                return self._send_json(
+                    handler, 400, {"error": "Duplicate upload filename."}
+                )
+            seen_names.add(lower)
+
+            if Path(filename).suffix.lower() not in allowed:
+                return self._send_json(
+                    handler, 400, {"error": "Unsupported file extension for this job type."}
+                )
+
+            data_b64 = item.get("data_b64")
+            if not isinstance(data_b64, str) or not data_b64.strip():
+                return self._send_json(handler, 400, {"error": "Missing upload data."})
+            try:
+                data = base64.b64decode(data_b64)
+            except Exception:  # noqa: BLE001 - malformed base64
+                return self._send_json(handler, 400, {"error": "Invalid base64 upload data."})
+            if not data:
+                return self._send_json(handler, 400, {"error": "Empty upload."})
+            uploads.append((filename, data))
 
         if job_type == "ai-clean":
             for required in ("provider", "model"):
@@ -620,14 +671,16 @@ class JobWebServer:
                     )
 
         try:
-            job_id = self._prepare_job(job_type, params, filename, data)
+            job_id = self._prepare_job(job_type, params, uploads)
         except Exception:  # noqa: BLE001 - never leak internals
             return self._send_json(handler, 500, {"error": "Could not prepare job."})
 
         self._send_json(handler, 202, {"job_id": job_id, "status": "queued"})
 
-    def _prepare_job(self, job_type: str, params: dict, filename: str, data: bytes) -> str:
-        """Create the job's private temp dir, write the upload, and submit."""
+    def _prepare_job(
+        self, job_type: str, params: dict, uploads: list[tuple[str, bytes]]
+    ) -> str:
+        """Create the job's private temp dir, write all uploads, and submit."""
         base = self._base
         if base is None:
             raise RuntimeError("server has been shut down")
@@ -639,8 +692,9 @@ class JobWebServer:
                 output_dir = job_dir / "output"
                 input_dir.mkdir(parents=True, exist_ok=True)
                 output_dir.mkdir(parents=True, exist_ok=True)
-                (input_dir / filename).write_bytes(data)
-                submit_params = self._build_params(job_type, params, job_dir, filename)
+                for filename, data in uploads:
+                    (input_dir / filename).write_bytes(data)
+                submit_params = self._build_params(job_type, params, job_dir, uploads)
                 self._manager.submit(job_type, submit_params, job_id=job_id)
                 return job_id
 
@@ -650,35 +704,67 @@ class JobWebServer:
             output_dir = job_dir / "output"
             input_dir.mkdir(parents=True, exist_ok=True)
             output_dir.mkdir(parents=True, exist_ok=True)
-            (input_dir / filename).write_bytes(data)
-            submit_params = self._build_params(job_type, params, job_dir, filename)
+            for filename, data in uploads:
+                (input_dir / filename).write_bytes(data)
+            submit_params = self._build_params(job_type, params, job_dir, uploads)
             job_id = self._manager.submit(job_type, submit_params)
             self._job_dirs[job_id] = job_dir
             return job_id
 
-    def _build_params(self, job_type: str, params: dict, job_dir: Path, filename: str) -> dict:
-        """Rewrite caller params to point at this job's private directories."""
+    def _build_params(
+        self, job_type: str, params: dict, job_dir: Path,
+        uploads: list[tuple[str, bytes]],
+    ) -> dict:
+        """Rewrite caller params to point at this job's private directories.
+
+        A single-file upload keeps the original ``file``-based params (so the
+        existing handlers/tests stay untouched); a multi-file upload switches
+        to directory mode so the package-level workers process every file.
+        """
         input_dir = job_dir / "input"
         output_dir = job_dir / "output"
+        single = len(uploads) == 1
+        filename = uploads[0][0] if single else None
         if job_type == "convert":
+            if single:
+                return {
+                    "file": str(input_dir / filename),
+                    "output_dir": str(output_dir),
+                    "overwrite": _bool_param(params, "overwrite", False),
+                }
             return {
-                "file": str(input_dir / filename),
+                "input_dir": str(input_dir),
                 "output_dir": str(output_dir),
                 "overwrite": _bool_param(params, "overwrite", False),
             }
         if job_type == "clean":
+            if single:
+                return {
+                    "file": str(input_dir / filename),
+                    "keep_lists": _bool_param(params, "keep_lists", True),
+                    "dedupe": _bool_param(params, "dedupe", True),
+                    "backup": _bool_param(params, "backup", True),
+                }
             return {
-                "file": str(input_dir / filename),
+                "input_dir": str(input_dir),
                 "keep_lists": _bool_param(params, "keep_lists", True),
                 "dedupe": _bool_param(params, "dedupe", True),
                 "backup": _bool_param(params, "backup", True),
             }
         if job_type == "ai-clean":
+            if single:
+                return {
+                    "file": str(input_dir / filename),
+                    "provider": str(params["provider"]),
+                    "model": str(params["model"]),
+                    "output": str(output_dir / f"{Path(filename).stem}.ai.md"),
+                    "overwrite": _bool_param(params, "overwrite", False),
+                }
             return {
-                "file": str(input_dir / filename),
+                "input_dir": str(input_dir),
+                "output_dir": str(output_dir),
                 "provider": str(params["provider"]),
                 "model": str(params["model"]),
-                "output": str(output_dir / f"{Path(filename).stem}.ai.md"),
                 "overwrite": _bool_param(params, "overwrite", False),
             }
         if job_type == "pipeline":
