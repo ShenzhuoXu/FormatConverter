@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from .config import PROJECT_ROOT
@@ -45,10 +47,35 @@ __all__ = [
 
 _ENV_KEY = b"ORCAROUTER_API_KEY"
 
+# Serializes read-modify-write mutations so two concurrent save/delete
+# requests (the web server is multi-threaded) can never interleave and drop
+# non-target lines.
+_ENV_LOCK = threading.RLock()
+
 
 def dotenv_path() -> Path:
     """Return the project-root ``.env`` path (imported from :mod:`.config`)."""
     return PROJECT_ROOT / ".env"
+
+
+def _read_raw(path: Path) -> bytes | None:
+    """Read the file's raw bytes; ``None`` when it does not exist.
+
+    A transient Windows sharing violation (e.g. another writer's atomic
+    replace, or an antivirus scan) is retried briefly. A persistent error
+    propagates so a caller never mistakes an unreadable file for a missing
+    one and clobbers it.
+    """
+    for attempt in range(5):
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            if attempt == 4:
+                raise
+            time.sleep(0.02)
+    return None  # pragma: no cover - the loop always returns or raises
 
 
 def _is_target_line(line: bytes) -> bool:
@@ -84,10 +111,12 @@ def read_env_key(path: Path | None = None) -> str | None:
     (including ``""`` / ``''``) counts as unset. The returned value is
     decoded as UTF-8 with ``errors="replace"``.
     """
-    p = Path(path) if path is not None else dotenv_path()
+    p = Path(path) if path is not None else Path(dotenv_path())
     try:
-        raw = p.read_bytes()
+        raw = _read_raw(p)
     except OSError:
+        return None
+    if raw is None:
         return None
     for line in raw.split(b"\n"):
         stripped = line.lstrip(b" \t\xef\xbb\xbf")
@@ -129,39 +158,41 @@ def write_env_key(value: str, path: Path | None = None) -> None:
     """
     if not isinstance(value, str) or not value:
         raise ValueError("value must be a non-empty string")
+    if "\n" in value or "\r" in value:
+        raise ValueError("value must not contain line breaks")
 
-    p = Path(path) if path is not None else dotenv_path()
+    p = Path(path) if path is not None else Path(dotenv_path())
     line_body = b'ORCAROUTER_API_KEY="' + value.encode("utf-8") + b'"'
 
-    try:
-        raw = p.read_bytes()
-    except OSError:
-        raw = None
-
-    if raw is None or raw == b"":
-        content = line_body + b"\n"
-    else:
-        lines = raw.split(b"\n")
-        trailing_empty = bool(lines and lines[-1] == b"")
-        target_idx = _first_target_index(lines)
-        if target_idx is not None:
-            newline_suffix = b"\r" if lines[target_idx].endswith(b"\r") else b""
-            new_lines = list(lines[:target_idx])
-            new_lines.append(line_body + newline_suffix)
-            for line in lines[target_idx + 1:]:
-                if not _is_target_line(line):
-                    new_lines.append(line)
+    # Under the lock so concurrent save/delete never interleave; a missing
+    # file is created, but any persistent read error propagates (it must not
+    # be mistaken for "no file" and clobber an existing .env).
+    with _ENV_LOCK:
+        raw = _read_raw(p)
+        if raw is None or raw == b"":
+            content = line_body + b"\n"
         else:
-            newline_suffix = b"\r" if any(line.endswith(b"\r") for line in lines) else b""
-            new_lines = list(lines)
-            if trailing_empty:
-                new_lines.insert(-1, line_body + newline_suffix)
-            else:
+            lines = raw.split(b"\n")
+            trailing_empty = bool(lines and lines[-1] == b"")
+            target_idx = _first_target_index(lines)
+            if target_idx is not None:
+                newline_suffix = b"\r" if lines[target_idx].endswith(b"\r") else b""
+                new_lines = list(lines[:target_idx])
                 new_lines.append(line_body + newline_suffix)
-                new_lines.append(b"")
-        content = b"\n".join(new_lines)
+                for line in lines[target_idx + 1:]:
+                    if not _is_target_line(line):
+                        new_lines.append(line)
+            else:
+                newline_suffix = b"\r" if any(line.endswith(b"\r") for line in lines) else b""
+                new_lines = list(lines)
+                if trailing_empty:
+                    new_lines.insert(-1, line_body + newline_suffix)
+                else:
+                    new_lines.append(line_body + newline_suffix)
+                    new_lines.append(b"")
+            content = b"\n".join(new_lines)
 
-    _atomic_write(p, content)
+        _atomic_write(p, content)
 
 
 def delete_env_key(path: Path | None = None) -> None:
@@ -171,17 +202,19 @@ def delete_env_key(path: Path | None = None) -> None:
     or a file with no target line is a no-op. If nothing remains, an empty
     file is left in place (the file itself is never deleted).
     """
-    p = Path(path) if path is not None else dotenv_path()
-    try:
-        raw = p.read_bytes()
-    except OSError:
-        return
-    lines = raw.split(b"\n")
-    new_lines = [line for line in lines if not _is_target_line(line)]
-    if len(new_lines) == len(lines):
-        return
-    content = b"\n".join(new_lines)
-    _atomic_write(p, content)
+    p = Path(path) if path is not None else Path(dotenv_path())
+    # Same lock as write_env_key so a concurrent delete can never interleave
+    # with a save and drop non-target lines.
+    with _ENV_LOCK:
+        raw = _read_raw(p)
+        if raw is None:
+            return
+        lines = raw.split(b"\n")
+        new_lines = [line for line in lines if not _is_target_line(line)]
+        if len(new_lines) == len(lines):
+            return
+        content = b"\n".join(new_lines)
+        _atomic_write(p, content)
 
 
 def key_status(
@@ -203,14 +236,30 @@ def key_status(
 
 
 def _atomic_write(path: Path, content: bytes) -> None:
-    """Write ``content`` to ``path`` atomically; never corrupt the target."""
+    """Write ``content`` to ``path`` atomically; never corrupt the target.
+
+    The target is never touched until the whole new content is on disk in a
+    same-directory temp file, then swapped in with :func:`os.replace`. On
+    Windows a just-written file can be momentarily locked by an antivirus or
+    indexer scan, which surfaces as a transient ``PermissionError``; the
+    replace is retried a few times to ride that out. Any *persistent* error
+    still propagates after the retries, and the original ``.env`` is never
+    corrupted.
+    """
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix=".env.", suffix=".tmp", dir=str(parent))
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(content)
-        os.replace(tmp_path, path)
+        for attempt in range(5):
+            try:
+                os.replace(tmp_path, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02)
     except Exception:
         try:
             os.unlink(tmp_path)

@@ -712,10 +712,17 @@ class TestKeyConfigEndpoints:
         assert _save_key(port, token, "sk-abc-12345", origin="http://evil.example/")[0] == 403
         # DNS-rebinding Origin host
         assert _save_key(port, token, "sk-abc-12345", origin="http://127.0.0.1.evil.com/")[0] == 403
+        # Origin with a path / userinfo / malformed port
+        assert _save_key(port, token, "sk-abc-12345", origin=f"http://127.0.0.1:{port}/extra")[0] == 403
+        assert _save_key(port, token, "sk-abc-12345", origin=f"http://user@127.0.0.1:{port}")[0] == 403
+        assert _save_key(port, token, "sk-abc-12345", origin="http://127.0.0.1:abc")[0] == 403
         # non-loopback Host
         assert _save_key(port, token, "sk-abc-12345", host="evil.example")[0] == 403
         # Host that merely starts with a loopback prefix
         assert _save_key(port, token, "sk-abc-12345", host="127.0.0.1.evil:1234")[0] == 403
+        # Host with userinfo / malformed port
+        assert _save_key(port, token, "sk-abc-12345", host="evil@127.0.0.1")[0] == 403
+        assert _save_key(port, token, "sk-abc-12345", host="127.0.0.1:abc")[0] == 403
 
     def test_save_key_validation(self, make_server, monkeypatch) -> None:
         monkeypatch.delenv("ORCAROUTER_API_KEY", raising=False)
@@ -736,6 +743,8 @@ class TestKeyConfigEndpoints:
         assert post({"api_key": "   "}) == 400  # whitespace-only
         assert post({"api_key": "1234567"}) == 400  # too short
         assert post({"api_key": "x" * 1025}) == 400  # too long
+        assert post({"api_key": "abc\ndefghi"}) == 400  # embedded LF (corrupts .env)
+        assert post({"api_key": "abc\rdefghi"}) == 400  # embedded CR (corrupts .env)
         status, _, _ = _request(
             port, "POST", "/api/ai/key", body=b"not json", headers=headers
         )

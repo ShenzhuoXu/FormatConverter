@@ -91,6 +91,14 @@ class TestWriteEnvKey:
         with pytest.raises(ValueError):
             env_store.write_env_key("", tmp_path / ".env")
 
+    def test_write_rejects_embedded_line_break(self, tmp_path: Path) -> None:
+        # A \n/\r would corrupt the .env layout with a permanent stray line.
+        p = tmp_path / ".env"
+        for bad in ("abc\ndefghi", "abc\rdefghi"):
+            with pytest.raises(ValueError):
+                env_store.write_env_key(bad, p)
+            assert not p.exists()
+
     def test_write_replaces_value_preserving_other_lines(self, tmp_path: Path) -> None:
         p = _write(tmp_path, b"# top\nFOO=bar\nORCAROUTER_API_KEY=sk-test-old\nBAZ=qux\n")
         env_store.write_env_key("sk-test-new", p)
@@ -146,6 +154,63 @@ class TestWriteEnvKey:
         assert p.read_bytes() == b"FOO=bar\n"
         leftovers = list(tmp_path.glob(".env.*.tmp"))
         assert leftovers == []
+
+    def test_atomic_write_retries_transient_permission_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Windows antivirus/indexer can briefly lock a just-written file,
+        # surfacing as a one-shot PermissionError on os.replace; the write
+        # must ride that out and still succeed.
+        p = tmp_path / ".env"
+        real_replace = env_store.os.replace
+        calls = {"n": 0}
+
+        def _flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(32, "file in use by another process")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(env_store.os, "replace", _flaky)
+        env_store.write_env_key("sk-test-abc", p)
+        assert calls["n"] >= 2
+        assert p.read_bytes() == b'ORCAROUTER_API_KEY="sk-test-abc"\n'
+        assert list(tmp_path.glob(".env.*.tmp")) == []
+
+    def test_write_retries_transient_read_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A one-shot read lock (another writer's replace) must be retried, not
+        # mistaken for a missing file that would clobber existing lines.
+        p = _write(tmp_path, b"FOO=bar\nORCAROUTER_API_KEY=sk-test-old\n")
+        real_read = Path.read_bytes
+        calls = {"n": 0}
+
+        def _flaky(self_):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(13, "sharing violation")
+            return real_read(self_)
+
+        monkeypatch.setattr(Path, "read_bytes", _flaky)
+        env_store.write_env_key("sk-test-abc", p)
+        assert calls["n"] >= 2
+        assert p.read_bytes() == b'FOO=bar\nORCAROUTER_API_KEY="sk-test-abc"\n'
+
+    def test_write_persistent_read_error_propagates_without_clobber(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A persistently unreadable .env must propagate, never be treated as
+        # "missing" and replaced with a key-only file.
+        p = _write(tmp_path, b"FOO=bar\n")
+
+        def _read_boom(*_args):
+            raise PermissionError(13, "sharing violation")
+
+        monkeypatch.setattr(Path, "read_bytes", _read_boom)
+        with pytest.raises(OSError):
+            env_store.write_env_key("sk-test-abc", p)
+        assert p.open("rb").read() == b"FOO=bar\n"
 
 
 class TestDeleteEnvKey:

@@ -288,7 +288,9 @@
             renderStatus("已配置", "系统环境变量", source);
             hintEl.textContent = "当前仍优先使用系统环境变量；保存的 .env Key 会在环境变量未设置时生效。";
             hintEl.hidden = false;
-            clearBtn.hidden = true;
+            // The env var itself can never be touched; clearing only ever
+            // removes the local .env backup key (per the product spec).
+            clearBtn.hidden = false;
           } else if (configured && source === "dot_env") {
             renderStatus("已配置", "本地 .env", source);
             hintEl.hidden = true;
@@ -375,6 +377,10 @@
         })
         .catch(function (err) {
           setError(err.message);
+        })
+        .then(function () {
+          // Hygiene: drop any unsaved draft typed into the password field.
+          input.value = "";
         });
     }
 

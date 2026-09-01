@@ -131,26 +131,35 @@ def _is_loopback_host(host: str) -> bool:
     """True when a ``Host`` header value names a loopback address.
 
     Accepts ``127.0.0.1``, ``127.0.0.1:8765``, ``localhost``, and
-    ``[::1]:8765``; the optional port is stripped before the loopback check.
-    Anything else (including DNS-rebinding names such as
-    ``127.0.0.1.evil``) is rejected.
+    ``[::1]:8765``. Rejects anything else, including DNS-rebinding names
+    (``127.0.0.1.evil``), userinfo (``evil@127.0.0.1``), paths, and
+    malformed ports (``127.0.0.1:abc``).
     """
     if not host:
         return False
     host = host.strip()
     try:
-        hostname = urllib.parse.urlsplit("//" + host).hostname or ""
+        parts = urllib.parse.urlsplit("//" + host)
     except ValueError:
         return False
-    return _is_loopback(hostname)
+    if parts.username is not None or parts.password is not None:
+        return False
+    if parts.path not in ("", "/"):
+        return False
+    try:
+        parts.port  # validates the port when present (raises on malformed)
+    except ValueError:
+        return False
+    return _is_loopback(parts.hostname or "")
 
 
 def _is_loopback_origin(origin: str) -> bool:
     """True when an ``Origin`` header value is a loopback http(s) origin.
 
     The scheme must be ``http`` or ``https`` and the hostname must be a
-    genuine loopback address. ``null``, a missing value, or a non-loopback
-    host (e.g. ``http://127.0.0.1.evil.com``) are all rejected.
+    genuine loopback address. ``null``, a missing value, userinfo, a path,
+    query/fragment, a malformed port, or a non-loopback host
+    (e.g. ``http://127.0.0.1.evil.com``) are all rejected.
     """
     if not origin:
         return False
@@ -160,8 +169,17 @@ def _is_loopback_origin(origin: str) -> bool:
         return False
     if parts.scheme not in ("http", "https"):
         return False
-    hostname = parts.hostname or ""
-    return _is_loopback(hostname)
+    if parts.username is not None or parts.password is not None:
+        return False
+    if parts.path not in ("", "/"):
+        return False
+    if parts.query or parts.fragment:
+        return False
+    try:
+        parts.port  # validates the port when present (raises on malformed)
+    except ValueError:
+        return False
+    return _is_loopback(parts.hostname or "")
 
 
 def _bool_param(params: dict, name: str, default: bool) -> bool:
@@ -511,6 +529,9 @@ class JobWebServer:
             return self._send_json(handler, 400, {"error": "Invalid api_key."})
         stripped = api_key.strip()
         if not (8 <= len(stripped) <= 1024):
+            return self._send_json(handler, 400, {"error": "Invalid api_key."})
+        if "\n" in stripped or "\r" in stripped:
+            # A line break would corrupt the .env layout (a stray half-line).
             return self._send_json(handler, 400, {"error": "Invalid api_key."})
 
         try:
