@@ -24,10 +24,16 @@ final element is the trailing separator, so reassembling the original text is
 from __future__ import annotations
 
 import re
+import time
+from typing import Callable, Sequence
 
-from .llm_client import LLMClient
+from .llm_client import LLMClient, is_retryable_llm_error
 
 DEFAULT_MAX_CHUNK_CHARS = 12_000
+
+# Callback reporting one successfully proofread chunk: (current, total) where
+# ``current`` is the 1-based chunk index and ``total`` is the chunk count.
+ChunkProgress = Callable[[int, int], None]
 
 # Fixed instruction sent with every chunk. Models must preserve the original
 # content and only fix obvious OCR, line-break, and Markdown formatting issues.
@@ -249,13 +255,25 @@ def clean_markdown_with_ai(
     model: str,
     system_prompt: str = SYSTEM_PROMPT,
     max_chars: int = DEFAULT_MAX_CHUNK_CHARS,
+    max_attempts: int = 4,
+    backoff_seconds: Sequence[float] = (1.0, 2.0, 4.0),
+    progress: ChunkProgress | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> str:
     """Proofread ``text`` chunk by chunk and return the revised Markdown.
 
-    Each chunk is sent to ``client.complete`` in order. If any chunk fails
-    (or chunking itself raises :class:`ChunkTooLargeError`), the exception
+    Each chunk is sent to ``client.complete`` in order. A chunk that fails
+    with a retryable LLM error is retried up to ``max_attempts`` times total,
+    sleeping ``backoff_seconds`` between attempts; a non-retryable error
+    (authentication, permission, empty response, or any other exception)
+    propagates immediately. If chunking itself raises
+    :class:`ChunkTooLargeError` or every attempt fails, the exception
     propagates and no result is returned — callers must write the output file
     only after this function returns successfully.
+
+    After each chunk is successfully revised, ``progress(current, total)`` is
+    called (when provided) with the 1-based chunk index and the total chunk
+    count.
 
     Revised chunks are reassembled with the *original* separators (leading,
     cross-chunk, and trailing), so an echo model reproduces the input's
@@ -268,10 +286,22 @@ def clean_markdown_with_ai(
         # verbatim rather than clearing it.
         return text
 
-    revised = [
-        client.complete(system=system_prompt, user=chunk, model=model)
-        for chunk in chunks
-    ]
+    revised: list[str] = []
+    for index, chunk in enumerate(chunks, start=1):
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                revised_chunk = client.complete(system=system_prompt, user=chunk, model=model)
+                revised.append(revised_chunk)
+                if progress is not None:
+                    progress(index, len(chunks))
+                break
+            except Exception as exc:
+                if attempts >= max_attempts or not is_retryable_llm_error(exc):
+                    raise
+                sleep(backoff_seconds[min(attempts - 1, len(backoff_seconds) - 1)])
+
     parts = []
     for i, revised_chunk in enumerate(revised):
         parts.append(separators[i])

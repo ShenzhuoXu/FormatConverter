@@ -353,6 +353,48 @@ class TestStep41Frontend:
 
 
 # ---------------------------------------------------------------------------
+# Step 4.3: service restart recovery (static)
+# ---------------------------------------------------------------------------
+
+
+class TestStep43Frontend:
+    def test_app_js_has_interrupted_status(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "interrupted" in js
+        assert "已中断" in js
+
+    def test_app_js_has_resume_job_function(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "resumeJob" in js
+        assert "/resume" in js
+
+    def test_app_js_has_continue_button_text(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "继续处理" in js
+
+    def test_app_js_renders_resume_button_for_interrupted(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        assert 'job.status === "interrupted"' in js
+
+
+# ---------------------------------------------------------------------------
+# Step 4.2: AI chunk progress rendering (static)
+# ---------------------------------------------------------------------------
+
+
+class TestStep42Frontend:
+    def test_app_js_renders_ai_chunk_progress(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "AI 校对中" in js
+        assert "data.total" in js
+        assert "data.current" in js
+        # Only ai-clean jobs (total > 0 while running) should render chunk
+        # progress; other job types must not be touched.
+        assert "job_type" in js
+        assert "ai-clean" in js
+
+
+# ---------------------------------------------------------------------------
 # JS syntax check (Node available on this machine)
 # ---------------------------------------------------------------------------
 
@@ -426,3 +468,48 @@ class TestEndToEndFlow:
 
         extracted = data.decode("utf-8")
         assert extracted.count("Alpha.") == 1  # dedupe actually ran
+
+
+# ---------------------------------------------------------------------------
+# Step 4.4: retry / delete controls (static)
+# ---------------------------------------------------------------------------
+
+
+class TestStep44Frontend:
+    def test_app_js_has_retry_function_and_endpoint(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "retryJob" in js
+        assert "/retry" in js
+        assert 'method: "POST"' in js
+
+    def test_app_js_has_delete_function_and_endpoint(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "deleteJob" in js
+        assert 'method: "DELETE"' in js
+
+    def test_app_js_retry_copy_distinguishes_failed_state(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "重试" in js
+        # failed ai-clean shows the retry control; interrupted shows continue.
+        assert 'job.status === "failed"' in js
+        assert 'job.status === "interrupted"' in js
+
+    def test_app_js_renders_delete_for_terminal_jobs(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        assert "删除" in js
+        # Terminal jobs (succeeded/failed/interrupted) all get a delete button.
+        assert 'job.status === "succeeded"' in js
+        assert "terminal" in js
+        assert "deleteJob" in js
+
+    def test_app_js_disables_actions_while_pending(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        # A row action guard prevents duplicate submits.
+        assert "pendingActions" in js
+        assert "btn.disabled = true" in js
+        assert "处理中…" in js
+
+    def test_app_js_never_leaks_durable_internals(self) -> None:
+        js = APP_JS.read_text(encoding="utf-8")
+        for token in (".formatconverter-jobs", "manifest", "checkpoint", "output_paths"):
+            assert token not in js, f"app.js leaks internal token {token!r}"

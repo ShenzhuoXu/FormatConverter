@@ -386,7 +386,9 @@ class JobWebServer:
         self._static_dir = Path(static_dir).resolve() if static_dir is not None else None
 
         if manager is None:
-            manager = _IdAwareJobManager()
+            from .ai_jobs import AIJobStore
+            store = AIJobStore()
+            manager = _IdAwareJobManager(ai_job_store=store)
         self._manager = manager
         self._id_aware = isinstance(manager, _IdAwareJobManager)
 
@@ -405,6 +407,11 @@ class JobWebServer:
         # valid for the lifetime of this server process. It is injected into
         # the served index.html so the UI can authenticate key write/delete.
         self._session_token = secrets.token_urlsafe(32)
+
+        # Hydrate durable AI job snapshots with proper output paths under the
+        # server's temp root so resume can write to the private job directory.
+        if hasattr(manager, '_hydrate_ai_job_snapshots'):
+            manager._hydrate_ai_job_snapshots(base_dir=self._base)
 
     # -- public API ---------------------------------------------------------
 
@@ -530,6 +537,15 @@ class JobWebServer:
             self._handle_save_model(handler)
         elif path == "/api/ai/connection-test":
             self._handle_connection_test(handler)
+        elif path.startswith("/api/jobs/"):
+            rest = path[len("/api/jobs/"):].rstrip("/")
+            parts = rest.split("/")
+            if len(parts) == 2 and parts[0] and parts[1] == "resume":
+                self._handle_resume_job(handler, parts[0])
+            elif len(parts) == 2 and parts[0] and parts[1] == "retry":
+                self._handle_retry_job(handler, parts[0])
+            else:
+                self._not_found(handler)
         else:
             self._not_found(handler)
 
@@ -539,6 +555,13 @@ class JobWebServer:
             self._handle_delete_key(handler)
         elif path == "/api/ai/models":
             self._handle_delete_model(handler)
+        elif path.startswith("/api/jobs/"):
+            rest = path[len("/api/jobs/"):].rstrip("/")
+            parts = rest.split("/")
+            if len(parts) == 1 and parts[0]:
+                self._handle_delete_job(handler, parts[0])
+            else:
+                self._not_found(handler)
         else:
             self._not_found(handler)
 
@@ -809,6 +832,13 @@ class JobWebServer:
                     return self._send_json(
                         handler, 400, {"error": f"Missing required param: {required}."}
                     )
+            from .model_store import validate_model
+            try:
+                params["model"] = validate_model(str(params["model"]))
+            except ValueError:
+                return self._send_json(
+                    handler, 400, {"error": "Invalid model name."}
+                )
 
         try:
             job_id = self._prepare_job(job_type, params, uploads)
@@ -899,6 +929,7 @@ class JobWebServer:
                     "model": str(params["model"]),
                     "output": str(output_dir / f"{Path(filename).stem}.ai.md"),
                     "overwrite": _bool_param(params, "overwrite", False),
+                    "_durable": True,
                 }
             return {
                 "input_dir": str(input_dir),
@@ -906,6 +937,7 @@ class JobWebServer:
                 "provider": str(params["provider"]),
                 "model": str(params["model"]),
                 "overwrite": _bool_param(params, "overwrite", False),
+                "_durable": True,
             }
         if job_type == "pipeline":
             return {
@@ -937,6 +969,8 @@ class JobWebServer:
                 "message": message,
                 "created_at": result.created_at,
                 "updated_at": result.updated_at,
+                "current": result.current,
+                "total": result.total,
             },
         )
 
@@ -995,6 +1029,82 @@ class JobWebServer:
             "application/zip",
             {"Content-Disposition": f'attachment; filename="{job_id}.zip"'},
         )
+
+    def _handle_resume_job(self, handler: BaseHTTPRequestHandler, job_id: str) -> None:
+        """Resume an interrupted durable AI job.
+
+        Prefers the in-memory snapshot; when none exists (an old durable job
+        older than the startup hydration window) the aggregated durable status
+        is consulted instead, so it is not mis-reported as 404.
+        """
+        result = self._manager.get(job_id)
+        if result is not None:
+            if result.status != JobStatus.interrupted:
+                return self._send_json(handler, 409, {"error": "Job is not in interrupted state."})
+            if result.job_type != "ai-clean":
+                return self._send_json(handler, 409, {"error": "Only AI jobs can be resumed."})
+        else:
+            status = self._manager.ai_web_job_status(job_id)
+            if status is None:
+                return self._not_found(handler)
+            if status is not JobStatus.interrupted:
+                return self._send_json(handler, 409, {"error": "Job is not in interrupted state."})
+        durable_id = self._manager.resume_ai_job(job_id)
+        if durable_id is None:
+            return self._send_json(
+                handler, 409, {"error": "Job has no resumable checkpoint."}
+            )
+        self._send_json(handler, 202, {"job_id": job_id, "status": "running"})
+
+    def _handle_retry_job(self, handler: BaseHTTPRequestHandler, job_id: str) -> None:
+        """Retry (continue from checkpoints) a failed/interrupted AI job.
+
+        Like resume, this falls back to the durable store for jobs with no
+        in-memory snapshot so old jobs are not mistaken for unknown.
+        """
+        result = self._manager.get(job_id)
+        if result is not None:
+            if result.status not in (JobStatus.interrupted, JobStatus.failed):
+                return self._send_json(handler, 409, {"error": "Job is not in a retryable state."})
+            if result.job_type != "ai-clean":
+                return self._send_json(handler, 409, {"error": "Only AI jobs can be retried."})
+        else:
+            status = self._manager.ai_web_job_status(job_id)
+            if status is None:
+                return self._not_found(handler)
+            if status not in (JobStatus.interrupted, JobStatus.failed):
+                return self._send_json(handler, 409, {"error": "Job is not in a retryable state."})
+        durable_id = self._manager.retry_ai_job(job_id)
+        if durable_id is None:
+            return self._send_json(
+                handler, 409, {"error": "Job has no resumable checkpoint."}
+            )
+        self._send_json(handler, 202, {"job_id": job_id, "status": "running"})
+
+    def _handle_delete_job(self, handler: BaseHTTPRequestHandler, job_id: str) -> None:
+        """Delete a job's web temp dir and durable checkpoints.
+
+        Prefers the in-memory snapshot: running/queued jobs are refused
+        (deleting under a live worker could race its writes). When no snapshot
+        exists, an old durable job whose checkpoints are still on disk is still
+        deletable. All error messages are sanitized; no durable job id,
+        checkpoint path, or absolute server path is ever reported.
+        """
+        result = self._manager.get(job_id)
+        if result is not None:
+            if result.status in (JobStatus.queued, JobStatus.running):
+                return self._send_json(
+                    handler, 409, {"error": "Job is still running and cannot be deleted."}
+                )
+        elif not self._manager.ai_web_job_exists(job_id):
+            return self._not_found(handler)
+        try:
+            self._manager.delete_ai_web_job(job_id)
+        except Exception:  # noqa: BLE001 - never leak internals
+            return self._send_json(handler, 500, {"error": "Could not delete the job."})
+        self.cleanup_job(job_id)
+        self._manager.forget(job_id)
+        self._send_json(handler, 200, {"deleted": True, "job_id": job_id})
 
     def _collect_download_files(self, result: object, job_root: Path) -> list[Path]:
         """Resolve the job's final output files, all inside ``job_root``.

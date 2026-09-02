@@ -38,11 +38,30 @@ class ConnectionFailedError(LLMClientError):
 
 
 class ServerError(LLMClientError):
-    """The provider returned an unexpected server error."""
+    """The provider returned an unexpected server error (HTTP 5xx)."""
+
+
+class InvalidRequestError(LLMClientError):
+    """The provider rejected the request as malformed (HTTP 4xx, e.g. 400)."""
+
+
+class ModelNotFoundError(LLMClientError):
+    """The requested model does not exist on the provider (HTTP 404)."""
 
 
 class EmptyResponseError(LLMClientError):
     """The provider returned a response with no message content."""
+
+
+def is_retryable_llm_error(exc: BaseException) -> bool:
+    """True when ``exc`` is a transient LLM failure worth retrying.
+
+    Only :class:`ConnectionFailedError`, :class:`RateLimitError`, and
+    :class:`ServerError` are retryable. Authentication, permission, invalid
+    request, model-not-found, empty response, and any other ordinary
+    exception are permanent and must not be retried.
+    """
+    return isinstance(exc, (ConnectionFailedError, RateLimitError, ServerError))
 
 
 @runtime_checkable
@@ -109,8 +128,17 @@ class OpenAICompatClient:
                 f"account permissions linked to {self._provider.api_key_env_var}."
             ) from exc
         except openai.APIStatusError as exc:
-            raise ServerError(
-                f"Provider {provider_name!r} returned a server error (HTTP {exc.status_code})."
+            status = exc.status_code
+            if status >= 500:
+                raise ServerError(
+                    f"Provider {provider_name!r} returned a server error (HTTP {status})."
+                ) from exc
+            if status == 404:
+                raise ModelNotFoundError(
+                    f"Provider {provider_name!r} could not find the requested model (HTTP 404)."
+                ) from exc
+            raise InvalidRequestError(
+                f"Provider {provider_name!r} rejected the request (HTTP {status})."
             ) from exc
 
         try:

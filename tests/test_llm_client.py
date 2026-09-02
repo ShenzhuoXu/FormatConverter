@@ -12,11 +12,14 @@ from format_converter.llm_client import (
     AuthenticationError,
     ConnectionFailedError,
     EmptyResponseError,
+    InvalidRequestError,
     LLMClient,
+    ModelNotFoundError,
     OpenAICompatClient,
     PermissionDeniedError,
     RateLimitError,
     ServerError,
+    is_retryable_llm_error,
 )
 from format_converter.providers import get_provider
 
@@ -134,6 +137,52 @@ class TestOpenAICompatClient:
             client.complete(system="s", user="u", model="m")
         assert SECRET not in str(excinfo.value)
 
+    def test_not_found_404_maps_to_model_not_found_not_server_error(self) -> None:
+        # A 404 must NOT be classified as a retryable ServerError; a missing
+        # model or endpoint is permanent and must not be retried.
+        fake = _FakeCompletions(
+            raise_exc=_status_error(openai.NotFoundError, 404)
+        )
+        client = make_client(fake)
+        with pytest.raises(ModelNotFoundError) as excinfo:
+            client.complete(system="s", user="u", model="no-such-model")
+        assert not isinstance(excinfo.value, ServerError)
+        assert SECRET not in str(excinfo.value)
+        assert "404" in str(excinfo.value)
+
+    def test_404_message_does_not_echo_key_shaped_model(self) -> None:
+        fake = _FakeCompletions(
+            raise_exc=_status_error(openai.NotFoundError, 404)
+        )
+        client = make_client(fake)
+        with pytest.raises(ModelNotFoundError) as excinfo:
+            client.complete(system="s", user="u", model="sk-secret")
+        message = str(excinfo.value)
+        assert "sk-secret" not in message
+        assert "sk-" not in message
+
+    def test_bad_request_400_maps_to_invalid_request(self) -> None:
+        fake = _FakeCompletions(
+            raise_exc=_status_error(openai.BadRequestError, 400)
+        )
+        client = make_client(fake)
+        with pytest.raises(InvalidRequestError) as excinfo:
+            client.complete(system="s", user="u", model="m")
+        assert not isinstance(excinfo.value, ServerError)
+        assert SECRET not in str(excinfo.value)
+        assert "400" in str(excinfo.value)
+
+    def test_400_message_does_not_echo_key_shaped_model(self) -> None:
+        fake = _FakeCompletions(
+            raise_exc=_status_error(openai.BadRequestError, 400)
+        )
+        client = make_client(fake)
+        with pytest.raises(InvalidRequestError) as excinfo:
+            client.complete(system="s", user="u", model="sk-other")
+        message = str(excinfo.value)
+        assert "sk-other" not in message
+        assert "sk-" not in message
+
     @pytest.mark.parametrize("content", [None, "", "   "])
     def test_empty_response_raises(self, content: str | None) -> None:
         fake = _FakeCompletions(content=content)
@@ -151,3 +200,21 @@ class TestOpenAICompatClient:
         client._client = _FakeSDK(_BareCompletions())  # type: ignore[arg-type]
         with pytest.raises(EmptyResponseError):
             client.complete(system="s", user="u", model="m")
+
+
+class TestRetryClassification:
+    def test_retryable_llm_errors_are_classified(self) -> None:
+        assert is_retryable_llm_error(ConnectionFailedError("network"))
+        assert is_retryable_llm_error(RateLimitError("429"))
+        assert is_retryable_llm_error(ServerError("500"))
+
+    def test_permanent_llm_errors_are_not_retryable(self) -> None:
+        assert not is_retryable_llm_error(AuthenticationError("401"))
+        assert not is_retryable_llm_error(PermissionDeniedError("403"))
+        assert not is_retryable_llm_error(EmptyResponseError("empty"))
+        assert not is_retryable_llm_error(InvalidRequestError("400"))
+        assert not is_retryable_llm_error(ModelNotFoundError("404"))
+
+    def test_ordinary_exception_is_not_retryable(self) -> None:
+        assert not is_retryable_llm_error(RuntimeError("boom"))
+        assert not is_retryable_llm_error(ValueError("x"))

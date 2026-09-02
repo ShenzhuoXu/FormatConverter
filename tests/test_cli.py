@@ -178,8 +178,23 @@ class TestAIClean:
 
     def test_failure_does_not_write_output(self, tmp_path: Path) -> None:
         src = make_md(tmp_path, content="One.\n\nTwo.\n\nThree.")
+
+        class AlwaysFailClient:
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                raise ServerError("simulated provider failure")
+
+        # A persistent retryable failure exhausts the retries and still fails,
+        # so no output file may be written.
         with pytest.raises(ServerError):
-            ai_clean(src, "orcarouter", "m1", client=EchoClient(fail_on=0))
+            ai_clean(
+                src,
+                "orcarouter",
+                "m1",
+                client=AlwaysFailClient(),
+                max_attempts=2,
+                backoff_seconds=(0.0,),
+                sleep=lambda _seconds: None,
+            )
         assert not (tmp_path / "example.ai.md").exists()
         assert src.read_text(encoding="utf-8") == "One.\n\nTwo.\n\nThree."
 

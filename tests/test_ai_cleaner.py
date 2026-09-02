@@ -14,6 +14,14 @@ from format_converter.ai_cleaner import (
     clean_markdown_with_ai,
     split_into_chunks,
 )
+from format_converter.llm_client import (
+    AuthenticationError,
+    ConnectionFailedError,
+    InvalidRequestError,
+    ModelNotFoundError,
+    RateLimitError,
+    ServerError,
+)
 
 _FENCE_MARKER = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
@@ -48,6 +56,21 @@ class EchoClient:
     def complete(self, *, system: str, user: str, model: str) -> str:
         self.calls.append({"system": system, "user": user, "model": model})
         return user
+
+
+class FlakyClient:
+    """Client whose ``complete`` pops the next outcome (exception or text)."""
+
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = list(outcomes)
+        self.calls: list[dict] = []
+
+    def complete(self, *, system: str, user: str, model: str) -> str:
+        self.calls.append({"system": system, "user": user, "model": model})
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return str(outcome)
 
 
 class TestSplitIntoChunks:
@@ -262,3 +285,125 @@ class TestCleanMarkdownWithAI:
         assert "ocr" in prompt
         assert "markdown formatting" in prompt
         assert "only the revised markdown" in prompt
+
+    def test_retries_retryable_chunk_failure_then_continues(self) -> None:
+        client = FlakyClient([ConnectionFailedError("network"), "fixed"])
+        sleeps: list[float] = []
+        result = clean_markdown_with_ai(
+            "Alpha.",
+            client,
+            model="m1",
+            max_attempts=2,
+            backoff_seconds=(0.25,),
+            sleep=sleeps.append,
+        )
+        assert result == "fixed"
+        assert sleeps == [0.25]
+        assert len(client.calls) == 2
+
+    def test_retries_exhausted_raises(self) -> None:
+        client = FlakyClient([ConnectionFailedError("network"), ConnectionFailedError("network")])
+        sleeps: list[float] = []
+        with pytest.raises(ConnectionFailedError):
+            clean_markdown_with_ai(
+                "Alpha.",
+                client,
+                model="m1",
+                max_attempts=2,
+                backoff_seconds=(0.1, 0.2),
+                sleep=sleeps.append,
+            )
+        assert len(client.calls) == 2  # exactly max_attempts, no extra attempt
+        assert sleeps == [0.1]
+
+    def test_permanent_error_does_not_retry(self) -> None:
+        client = FlakyClient([AuthenticationError("401")])
+        sleeps: list[float] = []
+        with pytest.raises(AuthenticationError):
+            clean_markdown_with_ai(
+                "Alpha.",
+                client,
+                model="m1",
+                max_attempts=4,
+                backoff_seconds=(0.1, 0.2, 0.3),
+                sleep=sleeps.append,
+            )
+        assert len(client.calls) == 1
+        assert sleeps == []
+
+    @pytest.mark.parametrize("exc", [ModelNotFoundError("404"), InvalidRequestError("400")])
+    def test_http_4xx_errors_do_not_retry(self, exc: Exception) -> None:
+        # 404/400-style provider errors are permanent and must not be retried,
+        # even though they are provider-level LLMClientError subclasses.
+        client = FlakyClient([exc])
+        sleeps: list[float] = []
+        with pytest.raises(type(exc)):
+            clean_markdown_with_ai(
+                "Alpha.",
+                client,
+                model="m1",
+                max_attempts=4,
+                backoff_seconds=(0.1, 0.2, 0.3),
+                sleep=sleeps.append,
+            )
+        assert len(client.calls) == 1
+        assert sleeps == []
+
+    def test_server_error_is_retryable_and_rate_limit_is_retryable(self) -> None:
+        # A retryable failure that is not ConnectionFailedError must also retry.
+        client = FlakyClient([ServerError("500"), "ok"])
+        sleeps: list[float] = []
+        assert (
+            clean_markdown_with_ai(
+                "Alpha.",
+                client,
+                model="m1",
+                max_attempts=3,
+                backoff_seconds=(0.1, 0.2),
+                sleep=sleeps.append,
+            )
+            == "ok"
+        )
+        assert len(client.calls) == 2
+
+        client2 = FlakyClient([RateLimitError("429"), "ok"])
+        sleeps2: list[float] = []
+        assert (
+            clean_markdown_with_ai(
+                "Alpha.",
+                client2,
+                model="m1",
+                max_attempts=3,
+                backoff_seconds=(0.1, 0.2),
+                sleep=sleeps2.append,
+            )
+            == "ok"
+        )
+        assert len(client2.calls) == 2
+
+    def test_reports_progress_after_each_successful_chunk(self) -> None:
+        progress: list[tuple[int, int]] = []
+        client = EchoClient()
+        clean_markdown_with_ai(
+            "One.\n\nTwo.",
+            client,
+            model="m1",
+            max_chars=6,
+            progress=lambda current, total: progress.append((current, total)),
+        )
+        assert progress == [(1, 2), (2, 2)]
+
+    def test_whitespace_only_input_does_not_call_progress(self) -> None:
+        progress: list[tuple[int, int]] = []
+        client = FakeClient()
+        assert (
+            clean_markdown_with_ai(
+                "   ",
+                client,
+                model="m1",
+                progress=lambda current, total: progress.append((current, total)),
+            )
+            == "   "
+        )
+        assert progress == []
+        assert client.calls == []

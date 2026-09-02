@@ -52,6 +52,7 @@
   var JOB_STATUS_LABELS = {
     queued: "排队",
     running: "处理中",
+    interrupted: "已中断",
     succeeded: "成功",
     failed: "失败"
   };
@@ -61,13 +62,17 @@
   var appState = {
     mode: "convert",
     files: [], // { name, size, file, valid, reason }
-    jobs: []   // { job_id, job_type, status, message, created_at, updated_at }
+    jobs: []   // { job_id, job_type, status, message, created_at, updated_at, current, total }
   };
 
   var busy = false;
   // job_id -> true while that job's poll loop is running. Never cleared on a
   // mode switch, so an in-flight job keeps updating after the user moves on.
   var polling = {};
+  // job_id -> true while a user-initiated action (resume/retry/delete) on that
+  // job's row is in flight, so the buttons are disabled until it settles and a
+  // duplicate POST/DELETE cannot be fired.
+  var pendingActions = {};
   // The job whose progress the main status line reflects (null after reload).
   var feedbackJobId = null;
 
@@ -328,7 +333,9 @@
           status: data.status || job.status,
           message: data.message != null ? data.message : job.message,
           created_at: typeof data.created_at === "number" ? data.created_at : job.created_at,
-          updated_at: typeof data.updated_at === "number" ? data.updated_at : job.updated_at
+          updated_at: typeof data.updated_at === "number" ? data.updated_at : job.updated_at,
+          current: typeof data.current === "number" ? data.current : job.current,
+          total: typeof data.total === "number" ? data.total : job.total
         };
       }
       return job;
@@ -340,7 +347,9 @@
         status: data.status || "queued",
         message: data.message || "",
         created_at: typeof data.created_at === "number" ? data.created_at : 0,
-        updated_at: typeof data.updated_at === "number" ? data.updated_at : 0
+        updated_at: typeof data.updated_at === "number" ? data.updated_at : 0,
+        current: typeof data.current === "number" ? data.current : 0,
+        total: typeof data.total === "number" ? data.total : 0
       });
     }
     renderJobs();
@@ -355,6 +364,35 @@
       return (n < 10 ? "0" : "") + n;
     }
     return two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds());
+  }
+
+  function actionPending(jobId) {
+    return Object.prototype.hasOwnProperty.call(pendingActions, jobId);
+  }
+
+  function beginAction(jobId) {
+    // Guards against a duplicate submit from a double click while the previous
+    // request for this job is still in flight.
+    if (actionPending(jobId)) {
+      return false;
+    }
+    pendingActions[jobId] = true;
+    renderJobs();
+    return true;
+  }
+
+  function appendAction(container, label, jobId, fn, pending, danger) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "job-action" + (danger ? " job-action-danger" : "");
+    if (pending) {
+      btn.disabled = true;
+      btn.textContent = "处理中…";
+    } else {
+      btn.textContent = label;
+      btn.addEventListener("click", function () { fn(jobId); });
+    }
+    container.appendChild(btn);
   }
 
   function renderJobs() {
@@ -393,13 +431,36 @@
       li.appendChild(statusEl);
       li.appendChild(timeEl);
 
+      var terminal = job.status === "succeeded" ||
+        job.status === "failed" || job.status === "interrupted";
+      var pending = actionPending(job.job_id);
+      var actions = document.createElement("span");
+      actions.className = "job-actions";
+
       if (job.status === "succeeded") {
         var link = document.createElement("a");
         link.className = "job-download";
         link.href = "/api/jobs/" + job.job_id + "/download";
         link.textContent = "下载结果";
-        li.appendChild(link);
+        actions.appendChild(link);
       }
+
+      if (job.job_type === "ai-clean") {
+        // failed/interrupted AI jobs get a continue/retry control; the text
+        // distinguishes the state. While a row action is in flight the button
+        // is disabled (handled inside appendAction) so it cannot be re-clicked.
+        if (job.status === "interrupted") {
+          appendAction(actions, "继续处理", job.job_id, resumeJob, pending);
+        } else if (job.status === "failed") {
+          appendAction(actions, "重试", job.job_id, retryJob, pending);
+        }
+      }
+
+      if (terminal) {
+        appendAction(actions, "删除", job.job_id, deleteJob, pending, true);
+      }
+
+      li.appendChild(actions);
 
       if (job.status === "failed") {
         var msg = document.createElement("span");
@@ -410,6 +471,96 @@
 
       list.appendChild(li);
     });
+  }
+
+  function resumeJob(jobId) {
+    if (!beginAction(jobId)) {
+      return;
+    }
+    fetch("/api/jobs/" + jobId + "/resume", { method: "POST" })
+      .then(function (resp) {
+        return resp.json().then(function (data) {
+          if (!resp.ok) {
+            throw new Error(data && data.error ? data.error : "继续处理失败（HTTP " + resp.status + "）。");
+          }
+          return data;
+        });
+      })
+      .then(function () {
+        delete pendingActions[jobId];
+        feedbackJobId = jobId;
+        setStatus("正在继续处理任务…", "running");
+        pollJob(jobId);
+      })
+      .catch(function (err) {
+        delete pendingActions[jobId];
+        renderJobs();
+        setError("继续处理失败：" + err.message);
+      });
+  }
+
+  function retryJob(jobId) {
+    if (!beginAction(jobId)) {
+      return;
+    }
+    fetch("/api/jobs/" + jobId + "/retry", { method: "POST" })
+      .then(function (resp) {
+        return resp.json().then(function (data) {
+          if (!resp.ok) {
+            throw new Error(data && data.error ? data.error : "重试失败（HTTP " + resp.status + "）。");
+          }
+          return data;
+        });
+      })
+      .then(function () {
+        delete pendingActions[jobId];
+        feedbackJobId = jobId;
+        setStatus("正在重新处理…", "running");
+        pollJob(jobId);
+      })
+      .catch(function (err) {
+        delete pendingActions[jobId];
+        renderJobs();
+        setError("重试失败：" + err.message);
+      });
+  }
+
+  function deleteJob(jobId) {
+    if (actionPending(jobId)) {
+      return;
+    }
+    if (!window.confirm("删除后该任务的输出与检查点将被清除且无法恢复。确定删除？")) {
+      return;
+    }
+    if (!beginAction(jobId)) {
+      return;
+    }
+    fetch("/api/jobs/" + jobId, { method: "DELETE" })
+      .then(function (resp) {
+        return resp.json().then(function (data) {
+          if (!resp.ok) {
+            throw new Error(data && data.error ? data.error : "删除失败（HTTP " + resp.status + "）。");
+          }
+          return data;
+        });
+      })
+      .then(function () {
+        delete pendingActions[jobId];
+        appState.jobs = appState.jobs.filter(function (job) {
+          return job.job_id !== jobId;
+        });
+        delete polling[jobId];
+        if (feedbackJobId === jobId) {
+          feedbackJobId = null;
+          setStatus("");
+        }
+        renderJobs();
+      })
+      .catch(function (err) {
+        delete pendingActions[jobId];
+        renderJobs();
+        setError("删除失败：" + err.message);
+      });
   }
 
   function loadRecentJobs() {
@@ -648,6 +799,11 @@
           }
           upsertJob(data);
           var status = data.status;
+          if (jobId === feedbackJobId && status === "running") {
+            if (data.job_type === "ai-clean" && typeof data.total === "number" && data.total > 0) {
+              setStatus("AI 校对中 · " + data.current + " / " + data.total, "running");
+            }
+          }
           if (status === "queued" || status === "running") {
             setTimeout(tick, POLL_INTERVAL_MS);
             return;

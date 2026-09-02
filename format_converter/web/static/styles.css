@@ -562,6 +562,45 @@ body {
   word-break: break-word;
 }
 
+.job-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+  flex-wrap: wrap;
+}
+
+.job-action {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-primary-dark);
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.job-action:hover:not(:disabled) {
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.job-action:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.job-action-danger {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+.job-action-danger:hover:not(:disabled) {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
 /* -- model memory / connection test feedback ------------------------------------ */
 
 .model-ok {

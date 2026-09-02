@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
+from typing import Callable, Sequence
 
-from .ai_cleaner import AICleanError, clean_markdown_with_ai
+from .ai_cleaner import AICleanError, ChunkProgress, DEFAULT_MAX_CHUNK_CHARS, SYSTEM_PROMPT, clean_markdown_with_ai, split_into_chunks
+from .ai_jobs import AIJobStore
 from .config import MARKDOWN_DIR, MARKER_OUTPUT_DIR, PDF_DIR
-from .llm_client import LLMClient, LLMClientError, OpenAICompatClient
+from .llm_client import LLMClient, LLMClientError, OpenAICompatClient, is_retryable_llm_error
 from .markdown_cleaner import clean_markdown_directory, clean_markdown_file
 from .pdf_converter import convert_pdf_directory, convert_pdf_file, convert_pdf_with_marker
 from .pipeline import run_pipeline
@@ -110,6 +113,12 @@ def ai_clean(
     output: Path | None = None,
     overwrite: bool = False,
     client: LLMClient | None = None,
+    progress: ChunkProgress | None = None,
+    max_attempts: int = 4,
+    backoff_seconds: Sequence[float] = (1.0, 2.0, 4.0),
+    sleep: Callable[[float], None] = time.sleep,
+    ai_job_store: AIJobStore | None = None,
+    web_job_id: str = "",
 ) -> Path:
     """Proofread one Markdown file with an AI provider and write the result.
 
@@ -117,6 +126,16 @@ def ai_clean(
     ``--overwrite`` is set, even when ``--output`` points at it. An existing
     output file also requires ``--overwrite``. Nothing is written if any chunk
     fails or the input is rejected.
+
+    When ``ai_job_store`` is provided, the job is checkpointed durably:
+    manifest, chunks, separators, and per-chunk results are written atomically
+    to ``.formatconverter-jobs/<job_id>/``.  After all chunks succeed, the
+    results are merged into ``final.md`` and the final output is written to
+    the caller-requested ``output`` path.
+
+    ``web_job_id``, when non-empty, is stored in the durable manifest so the
+    Web layer can later associate the checkpoint with a specific
+    :class:`JobResult`.
     """
     provider_config = get_provider(provider)
 
@@ -154,7 +173,68 @@ def ai_clean(
             f"Could not decode {input_path} as UTF-8. "
             "The file uses a different text encoding; re-save it as UTF-8 and try again."
         ) from exc
-    revised = clean_markdown_with_ai(markdown, client, model=model)
+
+    if ai_job_store is not None:
+        try:
+            manifest = ai_job_store.create_job(
+                input_path=input_path,
+                text=markdown,
+                provider=provider,
+                model=model,
+                max_chars=DEFAULT_MAX_CHUNK_CHARS,
+                web_job_id=web_job_id,
+                output_basename=output_path.name,
+            )
+        except Exception:
+            raise
+
+        job_id = manifest.job_id
+        ai_job_store.update_status(job_id, "running")
+
+        chunks, _ = split_into_chunks(markdown, max_chars=DEFAULT_MAX_CHUNK_CHARS)
+
+        revised: list[str] = []
+        try:
+            for index, chunk in enumerate(chunks, start=1):
+                attempts = 0
+                while True:
+                    attempts += 1
+                    try:
+                        result = client.complete(system=SYSTEM_PROMPT, user=chunk, model=model)
+                        break
+                    except Exception as exc:
+                        if attempts >= max_attempts or not is_retryable_llm_error(exc):
+                            raise
+                        sleep(backoff_seconds[min(attempts - 1, len(backoff_seconds) - 1)])
+                ai_job_store.save_result(job_id, index, result)
+                revised.append(result)
+                if progress is not None:
+                    progress(index, len(chunks))
+
+            ai_job_store.merge(job_id)
+            final_path = ai_job_store.job_dir(job_id) / "final.md"
+            merged = final_path.read_text(encoding="utf-8")
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(merged, encoding="utf-8", newline="\n")
+        except Exception:
+            try:
+                ai_job_store.update_status(job_id, "failed")
+            except Exception:
+                pass
+            raise
+
+        return output_path
+
+    revised = clean_markdown_with_ai(
+        markdown,
+        client,
+        model=model,
+        progress=progress,
+        max_attempts=max_attempts,
+        backoff_seconds=backoff_seconds,
+        sleep=sleep,
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(revised, encoding="utf-8", newline="\n")

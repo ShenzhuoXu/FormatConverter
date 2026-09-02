@@ -120,7 +120,8 @@ def _fake_run_pipeline(pdf_dir, md_dir, overwrite: bool = False, keep_lists: boo
 
 
 def _fake_ai_clean(file, provider: str, model: str, *, output=None,
-                   overwrite: bool = False, client=None) -> Path:
+                   overwrite: bool = False, client=None, progress=None,
+                   ai_job_store=None, **kwargs) -> Path:
     """Stand-in for cli.ai_clean used by the web 'ai-clean' job handler."""
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -329,6 +330,49 @@ class TestFailures:
         # download of a failed job is refused
         assert _request(port, "GET", f"/api/jobs/{job_id}/download")[0] == 409
 
+    def test_ai_clean_rejects_secret_shaped_model(self, make_server) -> None:
+        server, port = make_server()
+        content = "# Alpha\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "sk-short"}, "doc.md", content
+        )
+        assert status == 400
+        body = data.decode("utf-8")
+        assert "sk-" not in body
+
+    def test_ai_clean_rejects_whitespace_padded_secret_model(self, make_server) -> None:
+        server, port = make_server()
+        content = "# Alpha\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "  sk-short  "}, "doc.md", content
+        )
+        assert status == 400
+        body = data.decode("utf-8")
+        assert "sk-" not in body
+
+    def test_ai_clean_model_not_found_does_not_leak_model_name(self, make_server, monkeypatch) -> None:
+        from format_converter.llm_client import ModelNotFoundError
+
+        def _raising_fake(file, provider: str, model: str, *, output=None,
+                          overwrite: bool = False, client=None, progress=None,
+                          ai_job_store=None, **kwargs) -> Path:
+            raise ModelNotFoundError(
+                "Provider 'orcarouter' could not find the requested model (HTTP 404)."
+            )
+
+        monkeypatch.setattr("format_converter.jobs.ai_clean", _raising_fake)
+        server, port = make_server()
+        content = "# Alpha\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "no-such-model"}, "doc.md", content
+        )
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "failed"
+        assert "no-such-model" not in final["message"]
+
     def test_convert_empty_file_rejected_400(self, make_server) -> None:
         server, port = make_server()
         status, _, _ = _post_job(port, "convert", {}, "doc.pdf", "")
@@ -451,6 +495,70 @@ class TestAdditionalE2E:
         assert extracted.count("Alpha.") == 1  # dedupe still ran (default True)
 
 
+class TestJobProgressInAPI:
+    def test_status_response_includes_current_and_total(self, make_server) -> None:
+        server, port = make_server()
+        content = "# Doc\n\nAlpha.\n\nAlpha.\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "clean", {"dedupe": True, "backup": True}, "doc.md", content
+        )
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+        assert final["current"] == 0
+        assert final["total"] == 0
+        assert "output_paths" not in final
+        assert str(server.base_temp_dir) not in json.dumps(final)
+
+    def test_list_response_includes_current_and_total(self, make_server) -> None:
+        server, port = make_server()
+        content = "# Doc\n\nAlpha.\n\nAlpha.\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "clean", {"dedupe": True, "backup": True}, "doc.md", content
+        )
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+        _wait_terminal(port, job_id)
+
+        status, _, data = _request(port, "GET", "/api/jobs")
+        assert status == 200
+        payload = json.loads(data.decode("utf-8"))
+        entry = next(j for j in payload["jobs"] if j["job_id"] == job_id)
+        assert entry["current"] == 0
+        assert entry["total"] == 0
+        assert "output_paths" not in entry
+        assert str(server.base_temp_dir) not in json.dumps(entry)
+
+    def test_ai_clean_progress_reaches_status_api(self, make_server, monkeypatch) -> None:
+        def _progressing_ai_clean(file, provider, model, *, output=None,
+                                  overwrite=False, client=None, progress=None,
+                                  ai_job_store=None, **kwargs):
+            if progress is not None:
+                progress(1, 2)
+                progress(2, 2)
+            output = Path(output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("# ai cleaned", encoding="utf-8")
+            return output
+
+        monkeypatch.setattr("format_converter.jobs.ai_clean", _progressing_ai_clean)
+        server, port = make_server()
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"}, "doc.md", "# Alpha"
+        )
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+        assert final["current"] == 2
+        assert final["total"] == 2
+        assert "output_paths" not in final
+        assert str(server.base_temp_dir) not in json.dumps(final)
+
+
 class TestMultiUpload:
     def test_batch_clean_success_e2e(self, make_server) -> None:
         server, port = make_server()
@@ -538,7 +646,8 @@ class TestMultiUpload:
         calls: list[str] = []
 
         def _recording_ai_clean(file, provider: str, model: str, *, output=None,
-                               overwrite: bool = False, client=None) -> Path:
+                               overwrite: bool = False, client=None, progress=None,
+                               ai_job_store=None, **kwargs) -> Path:
             output = Path(output)
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text("# ai cleaned", encoding="utf-8")
@@ -833,6 +942,14 @@ class TestDownloadRules:
         outside.unlink(missing_ok=True)
 
     def test_zip_same_name_conflict_renamed_stably(self, make_server) -> None:
+        # Clean up any leftover AIJobStore entries so hydration does not create
+        # extra directories under the server's temp root.
+        import shutil
+        from pathlib import Path
+        leftover = Path.cwd() / ".formatconverter-jobs"
+        if leftover.is_dir():
+            shutil.rmtree(leftover)
+
         server, port = make_server()
         manager = server._manager
 
@@ -863,6 +980,11 @@ class TestDownloadRules:
             assert archive.read("doc-2.md").decode("utf-8") == "# second"
 
     def test_zip_double_suffix_conflict_renamed_stably(self, make_server) -> None:
+        import shutil
+        leftover = Path.cwd() / ".formatconverter-jobs"
+        if leftover.is_dir():
+            shutil.rmtree(leftover)
+
         server, port = make_server()
         manager = server._manager
 
@@ -892,6 +1014,11 @@ class TestDownloadRules:
             assert archive.read("doc.ai-2.md").decode("utf-8") == "# second"
 
     def test_directory_output_collected_recursively(self, make_server) -> None:
+        import shutil
+        leftover = Path.cwd() / ".formatconverter-jobs"
+        if leftover.is_dir():
+            shutil.rmtree(leftover)
+
         server, port = make_server()
         manager = server._manager
 
@@ -1647,3 +1774,801 @@ class TestConnectionTest:
             assert payload["ok"] is False
             assert expected in payload["error"]
             assert b"sk-" not in data
+
+
+# ---------------------------------------------------------------------------
+# durable AI job checkpoint (Task 2: Step 4.3)
+# ---------------------------------------------------------------------------
+
+
+class TestDurableAIJob:
+    def test_ai_clean_durable_job_directory_created(self, make_server, monkeypatch) -> None:
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-test-fake-key-for-durable")
+
+        class FakeOpenAIClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                return f"[revised] {user}"
+
+        monkeypatch.setattr("format_converter.cli.OpenAICompatClient", FakeOpenAIClient)
+        server, port = make_server()
+
+        content = "# Alpha\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"}, "doc.md", content
+        )
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+
+        # Durable job directory should exist under CWD.
+        durable_root = Path.cwd() / ".formatconverter-jobs"
+        assert durable_root.is_dir()
+        dirs = [d for d in durable_root.iterdir() if d.is_dir()]
+        assert len(dirs) >= 1
+        # No absolute path or API key leaks in responses.
+        body = json.dumps(final)
+        assert "sk-" not in body
+        assert str(durable_root) not in body
+        assert "output_paths" not in final
+
+        # Download still works through the normal path.
+        status, headers, data = _request(port, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+        assert 'filename="doc.ai.md"' in headers["Content-Disposition"]
+
+    def test_durable_job_list_does_not_leak_paths(self, make_server, monkeypatch) -> None:
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-test-fake-key-for-durable")
+
+        class FakeOpenAIClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                return f"[revised] {user}"
+
+        monkeypatch.setattr("format_converter.cli.OpenAICompatClient", FakeOpenAIClient)
+        server, port = make_server()
+
+        content = "# Alpha\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"}, "doc.md", content
+        )
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+        _wait_terminal(port, job_id)
+
+        # List endpoint must not leak durable-job paths.
+        status, _, data = _request(port, "GET", "/api/jobs")
+        assert status == 200
+        body = data.decode("utf-8")
+        assert ".formatconverter-jobs" not in body
+        assert "sk-" not in body
+        assert "output_paths" not in body
+
+    def test_durable_manifest_contains_web_job_id(self, make_server, monkeypatch) -> None:
+        import json
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-test-fake-key-for-durable")
+
+        class FakeOpenAIClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                return f"[revised] {user}"
+
+        monkeypatch.setattr("format_converter.cli.OpenAICompatClient", FakeOpenAIClient)
+        server, port = make_server()
+
+        content = "# Alpha\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"}, "doc.md", content
+        )
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+
+        # Find the durable manifest and check web_job_id.
+        durable_root = Path.cwd() / ".formatconverter-jobs"
+        for d in durable_root.iterdir():
+            if not d.is_dir():
+                continue
+            manifest_path = d / "manifest.json"
+            if manifest_path.is_file():
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest.get("web_job_id") == job_id:
+                    return
+        pytest.fail(f"no durable manifest with web_job_id={job_id!r} found")
+
+    def test_durable_manifest_trims_model_name(self, make_server, monkeypatch) -> None:
+        import json
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-test-fake-key-for-durable")
+
+        class FakeOpenAIClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                return f"[revised] {user}"
+
+        monkeypatch.setattr("format_converter.cli.OpenAICompatClient", FakeOpenAIClient)
+        server, port = make_server()
+
+        content = "# Alpha\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "  gpt-4o  "}, "doc.md", content
+        )
+        assert status == 202
+        job_id = json.loads(data.decode("utf-8"))["job_id"]
+
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+
+        # Find the durable manifest and check model is trimmed.
+        durable_root = Path.cwd() / ".formatconverter-jobs"
+        for d in durable_root.iterdir():
+            if not d.is_dir():
+                continue
+            manifest_path = d / "manifest.json"
+            if manifest_path.is_file():
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest.get("web_job_id") == job_id:
+                    assert manifest["model"] == "gpt-4o"
+                    return
+        pytest.fail(f"no durable manifest with web_job_id={job_id!r} found")
+
+
+# ---------------------------------------------------------------------------
+# service restart recovery (Task 3: Step 4.3 resume)
+# ---------------------------------------------------------------------------
+
+
+class TestResumeDurableJob:
+    def test_resume_interrupted_durable_job(self, make_server, monkeypatch, tmp_path) -> None:
+        import json as _json
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-test-fake-key-for-resume")
+
+        class FakeOpenAIClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                return f"[revised] {user}"
+
+        monkeypatch.setattr("format_converter.cli.OpenAICompatClient", FakeOpenAIClient)
+        from format_converter.ai_jobs import AIJobStore
+        from format_converter.web_server import _IdAwareJobManager
+
+        server, port = make_server()
+        content = "# Alpha\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"}, "doc.md", content
+        )
+        assert status == 202
+        job_id = _json.loads(data.decode("utf-8"))["job_id"]
+        _wait_terminal(port, job_id)
+
+        store = AIJobStore()
+        store.mark_stale_running_interrupted()
+        for m in store.scan_recent():
+            if m.web_job_id == job_id:
+                store.update_status(m.job_id, "interrupted")
+                break
+
+        manager = _IdAwareJobManager(ai_job_store=store)
+        server2, port2 = make_server(manager=manager)
+
+        status, _, data = _request(port2, "GET", f"/api/jobs/{job_id}")
+        assert status == 200
+        payload = _json.loads(data.decode("utf-8"))
+        assert payload["status"] == "interrupted"
+
+        status, _, data = _request(port2, "POST", f"/api/jobs/{job_id}/resume")
+        assert status == 202
+        payload = _json.loads(data.decode("utf-8"))
+        assert payload["status"] == "running"
+
+        final = _wait_terminal(port2, job_id)
+        assert final["status"] == "succeeded"
+
+    def test_resume_unknown_job_404(self, make_server) -> None:
+        server, port = make_server()
+        status, _, _ = _request(port, "POST", "/api/jobs/00000000000000000000000000000000/resume")
+        assert status == 404
+
+    def test_default_server_creates_ai_job_store(self, make_server) -> None:
+        server, port = make_server()
+        assert hasattr(server._manager, '_ai_job_store')
+        assert server._manager._ai_job_store is not None
+
+    def test_resume_succeeded_download_returns_200(self, make_server, monkeypatch, tmp_path) -> None:
+        import json as _json
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-test-fake-key-for-resume-dl")
+
+        class FakeOpenAIClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                return f"[revised] {user}"
+
+        monkeypatch.setattr("format_converter.cli.OpenAICompatClient", FakeOpenAIClient)
+        from format_converter.ai_jobs import AIJobStore
+
+        server, port = make_server()
+        content = "# Alpha\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"}, "doc.md", content
+        )
+        assert status == 202
+        job_id = _json.loads(data.decode("utf-8"))["job_id"]
+        _wait_terminal(port, job_id)
+
+        store = AIJobStore()
+        store.mark_stale_running_interrupted()
+        for m in store.scan_recent():
+            if m.web_job_id == job_id:
+                store.update_status(m.job_id, "interrupted")
+                break
+
+        from format_converter.web_server import _IdAwareJobManager
+        manager = _IdAwareJobManager(ai_job_store=store)
+        server2, port2 = make_server(manager=manager)
+
+        status, _, data = _request(port2, "POST", f"/api/jobs/{job_id}/resume")
+        assert status == 202
+        final = _wait_terminal(port2, job_id)
+        assert final["status"] == "succeeded"
+
+        status, _, data = _request(port2, "GET", f"/api/jobs/{job_id}/download")
+        assert status == 200
+
+    def test_resume_failure_message_sanitized(self, make_server, monkeypatch, tmp_path) -> None:
+        import json as _json
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-secret-value")
+
+        class BoomClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                raise RuntimeError("sk-secret-value leaked in resume error")
+
+        monkeypatch.setattr("format_converter.cli.OpenAICompatClient", BoomClient)
+        # Resume runs a different code path (jobs._resume_single_chunk_loop) that
+        # constructs the client from llm_client, so patch that too to keep the
+        # test fully offline and deterministic.
+        monkeypatch.setattr("format_converter.llm_client.OpenAICompatClient", BoomClient)
+        from format_converter.ai_jobs import AIJobStore
+
+        server, port = make_server()
+        content = "# Alpha\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"}, "doc.md", content
+        )
+        assert status == 202
+        job_id = _json.loads(data.decode("utf-8"))["job_id"]
+        _wait_terminal(port, job_id)
+
+        store = AIJobStore()
+        store.mark_stale_running_interrupted()
+        for m in store.scan_recent():
+            if m.web_job_id == job_id:
+                store.update_status(m.job_id, "interrupted")
+                break
+
+        from format_converter.web_server import _IdAwareJobManager
+        manager = _IdAwareJobManager(ai_job_store=store)
+        server2, port2 = make_server(manager=manager)
+
+        status, _, data = _request(port2, "POST", f"/api/jobs/{job_id}/resume")
+        assert status == 202
+        final = _wait_terminal(port2, job_id)
+        assert final["status"] == "failed"
+        body = _json.dumps(final)
+        assert "sk-" not in body
+
+    def test_resume_non_interrupted_409(self, make_server) -> None:
+        server, port = make_server()
+        content = "# Doc\n\nAlpha.\n\nAlpha.\n\nBeta.\n"
+        status, _, data = _post_job(port, "clean", {"dedupe": True, "backup": True}, "doc.md", content)
+        assert status == 202
+        import json as _json
+        job_id = _json.loads(data.decode("utf-8"))["job_id"]
+        _wait_terminal(port, job_id)
+
+        status, _, data = _request(port, "POST", f"/api/jobs/{job_id}/resume")
+        assert status == 409
+        payload = _json.loads(data.decode("utf-8"))
+        assert "not in interrupted state" in payload["error"]
+
+
+# ---------------------------------------------------------------------------
+# Task 4: retry + delete job management (API level)
+# ---------------------------------------------------------------------------
+
+
+class TestRetryJob:
+    def test_retry_failed_ai_clean_skips_completed_chunk(
+        self, make_server, monkeypatch, tmp_path
+    ) -> None:
+        import json as _json
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-test-fake-key-for-retry")
+
+        class EchoClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                return f"[revised] {user}"
+
+        monkeypatch.setattr("format_converter.cli.OpenAICompatClient", EchoClient)
+        server, port = make_server()
+
+        # Two-chunk document: chunk 1 (A-run) then chunk 2 (B-run + C).
+        content = ("A" * 6000) + "\n\n" + ("B" * 6000) + "\n\n" + "C"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"},
+            "doc.md", content,
+        )
+        assert status == 202
+        job_id = _json.loads(data.decode("utf-8"))["job_id"]
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+
+        from format_converter.ai_jobs import AIJobStore
+        store = AIJobStore()
+        manifest = next(m for m in store.find_by_web_job_id(job_id))
+        assert manifest.total_chunks == 2
+        results_dir = store.job_dir(manifest.job_id) / "results"
+        assert (results_dir / "0001.md").is_file()
+        # Simulate a durable failure after chunk 1: chunk 2's result vanished
+        # and the manifest was marked failed.
+        (results_dir / "0002.md").unlink()
+        store.update_status(manifest.job_id, "failed")
+
+        class RecordingClient:
+            calls: list[str] = []
+
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                RecordingClient.calls.append(user)
+                return f"[revised] {user}"
+
+        RecordingClient.calls = []
+        monkeypatch.setattr("format_converter.llm_client.OpenAICompatClient", RecordingClient)
+
+        from format_converter.web_server import _IdAwareJobManager
+        manager = _IdAwareJobManager(ai_job_store=store)
+        server2, port2 = make_server(manager=manager)
+
+        status, _, data = _request(port2, "GET", f"/api/jobs/{job_id}")
+        assert status == 200
+        assert _json.loads(data.decode("utf-8"))["status"] == "failed"
+
+        status, _, data = _request(port2, "POST", f"/api/jobs/{job_id}/retry")
+        assert status == 202
+        payload = _json.loads(data.decode("utf-8"))
+        assert payload["status"] == "running"
+
+        final = _wait_terminal(port2, job_id)
+        assert final["status"] == "succeeded"
+        # Only the missing chunk (chunk 2) was re-requested — once.
+        assert len(RecordingClient.calls) == 1
+        assert ("B" * 6000) in RecordingClient.calls[0]
+        assert store.load(manifest.job_id).status == "completed"
+        assert (results_dir / "0002.md").is_file()
+        # The previously completed chunk-1 result was never re-requested and
+        # is untouched.
+        assert (results_dir / "0001.md").is_file()
+
+    def test_retry_rejects_succeeded(self, make_server) -> None:
+        server, port = make_server()
+        content = "# Doc\n\nAlpha.\n\nAlpha.\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "clean", {"dedupe": True, "backup": True}, "doc.md", content
+        )
+        assert status == 202
+        import json as _json
+        job_id = _json.loads(data.decode("utf-8"))["job_id"]
+        _wait_terminal(port, job_id)
+        status, _, data = _request(port, "POST", f"/api/jobs/{job_id}/retry")
+        assert status == 409
+        payload = _json.loads(data.decode("utf-8"))
+        assert "retryable" in payload["error"]
+
+    def test_retry_unknown_job_404(self, make_server) -> None:
+        server, port = make_server()
+        status, _, _ = _request(
+            port, "POST", "/api/jobs/00000000000000000000000000000000/retry"
+        )
+        assert status == 404
+
+    def test_retry_while_running_409(self, make_server) -> None:
+        server, port = make_server()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_ai(_params: dict) -> tuple[tuple[Path, ...], str]:
+            entered.set()
+            assert release.wait(10), "release event not set"
+            return (Path("out.md"),), "blocked done"
+
+        server._manager.handlers["ai-clean"] = _blocking_ai
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"},
+            "doc.md", "# Alpha\n\nBeta.\n",
+        )
+        assert status == 202
+        import json as _json
+        job_id = _json.loads(data.decode("utf-8"))["job_id"]
+        assert entered.wait(5), "ai-clean handler never started"
+
+        status, _, data = _request(port, "POST", f"/api/jobs/{job_id}/retry")
+        assert status == 409
+        payload = _json.loads(data.decode("utf-8"))
+        assert "retryable" in payload["error"]
+
+        release.set()
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+
+    def test_retry_rejects_failed_non_ai_job(self, make_server) -> None:
+        server, port = make_server()
+
+        def _boom(_params: dict) -> tuple[tuple[Path, ...], str]:
+            raise RuntimeError("boom")
+
+        server._manager.handlers["clean"] = _boom
+        status, _, data = _post_job(port, "clean", {}, "doc.md", "# hi")
+        assert status == 202
+        import json as _json
+        job_id = _json.loads(data.decode("utf-8"))["job_id"]
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "failed"
+
+        status, _, data = _request(port, "POST", f"/api/jobs/{job_id}/retry")
+        assert status == 409
+        payload = _json.loads(data.decode("utf-8"))
+        assert "Only AI jobs can be retried" in payload["error"]
+
+
+class TestDeleteJob:
+    def test_delete_ai_clean_job_removes_temp_and_durable(
+        self, make_server, monkeypatch, tmp_path
+    ) -> None:
+        import json as _json
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-test-fake-key-for-delete")
+
+        class EchoClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                return f"[revised] {user}"
+
+        monkeypatch.setattr("format_converter.cli.OpenAICompatClient", EchoClient)
+        server, port = make_server()
+
+        content = "# Alpha\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"},
+            "doc.md", content,
+        )
+        assert status == 202
+        job_id = _json.loads(data.decode("utf-8"))["job_id"]
+        final = _wait_terminal(port, job_id)
+        assert final["status"] == "succeeded"
+
+        from format_converter.ai_jobs import AIJobStore
+        store = AIJobStore()
+        assert store.find_by_web_job_id(job_id) != []
+        base = server.base_temp_dir
+        assert base is not None
+        assert (base / job_id).is_dir()
+
+        status, _, data = _request(port, "DELETE", f"/api/jobs/{job_id}")
+        assert status == 200
+        payload = _json.loads(data.decode("utf-8"))
+        assert payload == {"deleted": True, "job_id": job_id}
+        body = data.decode("utf-8")
+        assert "sk-" not in body
+        assert str(base) not in body
+
+        # Snapshot gone from status and list, temp dir gone, durable gone.
+        assert _request(port, "GET", f"/api/jobs/{job_id}")[0] == 404
+        assert not (base / job_id).exists()
+        assert store.find_by_web_job_id(job_id) == []
+
+    def test_delete_clean_terminal_job(self, make_server) -> None:
+        import json as _json
+        server, port = make_server()
+        content = "# Doc\n\nAlpha.\n\nAlpha.\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "clean", {"dedupe": True, "backup": True}, "doc.md", content
+        )
+        assert status == 202
+        job_id = _json.loads(data.decode("utf-8"))["job_id"]
+        _wait_terminal(port, job_id)
+
+        base = server.base_temp_dir
+        assert base is not None
+        assert (base / job_id).is_dir()
+        status, _, data = _request(port, "DELETE", f"/api/jobs/{job_id}")
+        assert status == 200
+        assert not (base / job_id).exists()
+        assert _request(port, "GET", f"/api/jobs/{job_id}")[0] == 404
+
+    def test_delete_unknown_job_404(self, make_server) -> None:
+        server, port = make_server()
+        status, _, _ = _request(
+            port, "DELETE", "/api/jobs/00000000000000000000000000000000"
+        )
+        assert status == 404
+
+    def test_delete_running_job_409(self, make_server) -> None:
+        server, port = make_server()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_ai(_params: dict) -> tuple[tuple[Path, ...], str]:
+            entered.set()
+            assert release.wait(10), "release event not set"
+            return (Path("out.md"),), "blocked done"
+
+        server._manager.handlers["ai-clean"] = _blocking_ai
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"},
+            "doc.md", "# Alpha\n\nBeta.\n",
+        )
+        assert status == 202
+        import json as _json
+        job_id = _json.loads(data.decode("utf-8"))["job_id"]
+        assert entered.wait(5), "ai-clean handler never started"
+
+        status, _, data = _request(port, "DELETE", f"/api/jobs/{job_id}")
+        assert status == 409
+        release.set()
+        _wait_terminal(port, job_id)
+
+    def test_delete_does_not_touch_unrelated_durable(
+        self, make_server, monkeypatch, tmp_path
+    ) -> None:
+        import json as _json
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-test-fake-key-for-delete-multi")
+
+        class EchoClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                return f"[revised] {user}"
+
+        monkeypatch.setattr("format_converter.cli.OpenAICompatClient", EchoClient)
+        server, port = make_server()
+
+        content = "# Alpha\n\nBeta.\n"
+        status, _, data = _post_job(
+            port, "ai-clean", {"provider": "orcarouter", "model": "m1"},
+            "doc.md", content,
+        )
+        assert status == 202
+        job_id = _json.loads(data.decode("utf-8"))["job_id"]
+        _wait_terminal(port, job_id)
+
+        from format_converter.ai_jobs import AIJobStore
+        store = AIJobStore()
+        # A second, unrelated durable job in the same store must survive.
+        other = store.create_job(
+            tmp_path / "other.md", "Keep me.", "orcarouter", "m1", 100,
+            web_job_id="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            output_basename="keep.ai.md",
+        )
+        assert store.find_by_web_job_id(job_id) != []
+        assert store.load(other.job_id).status == "running"
+
+        status, _, data = _request(port, "DELETE", f"/api/jobs/{job_id}")
+        assert status == 200
+        assert store.find_by_web_job_id(job_id) == []
+        assert store.load(other.job_id).status == "running"
+        assert store.job_dir(other.job_id).is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (fix): durable jobs older than the startup hydration window
+# ---------------------------------------------------------------------------
+
+
+class TestOldDurableJobs:
+    """Handlers must not 404 on durable jobs that startup hydration skipped.
+
+    Startup only snapshots ``scan_recent()`` (20 newest) into JobManager
+    memory. These tests seed a target that is deliberately older than 25 newer
+    durable jobs, so it has no in-memory snapshot — yet resume/retry/delete must
+    still act on its checkpoints via the durable store.
+    """
+
+    def _seed_old_target(self, store, tmp_path, *, target_status="failed",
+                         completed=False) -> tuple[str, object]:
+        import json as _json
+        import uuid as _uuid
+        web_id = _uuid.uuid4().hex
+        manifest = store.create_job(
+            tmp_path / "target.md", "One.\n\nTwo.", "orcarouter", "m1", 6,
+            web_job_id=web_id, output_basename="target.ai.md",
+        )
+        assert manifest.total_chunks == 2
+        if completed:
+            store.save_result(manifest.job_id, 1, "R1")
+            store.save_result(manifest.job_id, 2, "R2")
+            store.merge(manifest.job_id)
+        else:
+            # Only chunk 1's result is on disk; chunk 2 stays missing so a
+            # later continuation must re-request exactly one chunk.
+            store.save_result(manifest.job_id, 1, "R1")
+            store.update_status(manifest.job_id, target_status)
+        # Push the target far below the newest-20 window.
+        manifest_path = store.job_dir(manifest.job_id) / "manifest.json"
+        raw = _json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw["created_at"] = 0.0
+        raw["updated_at"] = 0.0
+        manifest_path.write_text(_json.dumps(raw), encoding="utf-8")
+        # 26 newer durable jobs guarantee scan_recent(20) never sees the target.
+        for i in range(26):
+            fill_id = _uuid.uuid4().hex
+            fill = store.create_job(
+                tmp_path / f"fill{i}.md", "Keep.", "orcarouter", "m1", 100,
+                web_job_id=fill_id, output_basename=f"fill{i}.ai.md",
+            )
+            store.update_status(fill.job_id, "completed")
+        return web_id, manifest
+
+    def _server_for(self, make_server, store):
+        from format_converter.ai_jobs import AIJobStore
+        from format_converter.web_server import _IdAwareJobManager
+        assert isinstance(store, AIJobStore)
+        manager = _IdAwareJobManager(ai_job_store=store)
+        return make_server(manager=manager)
+
+    def test_retry_old_failed_job_beyond_hydration_returns_202(
+        self, make_server, monkeypatch, tmp_path
+    ) -> None:
+        import json as _json
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-test-fake-key-for-old-retry")
+        from format_converter.ai_jobs import AIJobStore
+        store = AIJobStore(tmp_path / ".formatconverter-jobs")
+        web_id, manifest = self._seed_old_target(store, tmp_path, target_status="failed")
+
+        class RecordingClient:
+            calls: list[str] = []
+
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                RecordingClient.calls.append(user)
+                return f"[revised] {user}"
+
+        RecordingClient.calls = []
+        monkeypatch.setattr("format_converter.llm_client.OpenAICompatClient", RecordingClient)
+        server, port = self._server_for(make_server, store)
+
+        # No in-memory snapshot (older than the hydration window).
+        status, _, _ = _request(port, "GET", f"/api/jobs/{web_id}")
+        assert status == 404
+
+        status, _, data = _request(port, "POST", f"/api/jobs/{web_id}/retry")
+        assert status == 202
+        payload = _json.loads(data.decode("utf-8"))
+        assert payload["status"] == "running"
+        body = data.decode("utf-8")
+        assert "sk-" not in body and "output_paths" not in body
+        assert str(server.base_temp_dir) not in body
+
+        final = _wait_terminal(port, web_id)
+        assert final["status"] == "succeeded"
+        # Only the missing chunk was re-requested.
+        assert len(RecordingClient.calls) == 1
+        assert RecordingClient.calls[0] == "Two."
+        assert store.load(manifest.job_id).status == "completed"
+
+    def test_resume_old_interrupted_job_beyond_hydration_returns_202(
+        self, make_server, monkeypatch, tmp_path
+    ) -> None:
+        import json as _json
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-test-fake-key-for-old-resume")
+        from format_converter.ai_jobs import AIJobStore
+        store = AIJobStore(tmp_path / ".formatconverter-jobs")
+        web_id, manifest = self._seed_old_target(
+            store, tmp_path, target_status="interrupted"
+        )
+
+        class RecordingClient:
+            calls: list[str] = []
+
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def complete(self, *, system: str, user: str, model: str) -> str:
+                RecordingClient.calls.append(user)
+                return f"[revised] {user}"
+
+        RecordingClient.calls = []
+        monkeypatch.setattr("format_converter.llm_client.OpenAICompatClient", RecordingClient)
+        server, port = self._server_for(make_server, store)
+
+        status, _, _ = _request(port, "GET", f"/api/jobs/{web_id}")
+        assert status == 404
+
+        status, _, data = _request(port, "POST", f"/api/jobs/{web_id}/resume")
+        assert status == 202
+        body = data.decode("utf-8")
+        assert "sk-" not in body and "output_paths" not in body
+        assert str(server.base_temp_dir) not in body
+
+        final = _wait_terminal(port, web_id)
+        assert final["status"] == "succeeded"
+        assert len(RecordingClient.calls) == 1
+        assert RecordingClient.calls[0] == "Two."
+        assert store.load(manifest.job_id).status == "completed"
+
+    def test_delete_old_durable_without_snapshot(self, make_server, tmp_path) -> None:
+        import json as _json
+        from format_converter.ai_jobs import AIJobStore
+        store = AIJobStore(tmp_path / ".formatconverter-jobs")
+        web_id, _ = self._seed_old_target(store, tmp_path, target_status="failed")
+        assert store.find_by_web_job_id(web_id) != []
+
+        server, port = self._server_for(make_server, store)
+        status, _, _ = _request(port, "GET", f"/api/jobs/{web_id}")
+        assert status == 404
+
+        status, _, data = _request(port, "DELETE", f"/api/jobs/{web_id}")
+        assert status == 200
+        payload = _json.loads(data.decode("utf-8"))
+        assert payload == {"deleted": True, "job_id": web_id}
+        body = data.decode("utf-8")
+        assert "sk-" not in body and "output_paths" not in body
+        assert str(server.base_temp_dir) not in body
+        # The durable checkpoint is gone even though no snapshot ever existed.
+        assert store.find_by_web_job_id(web_id) == []
+
+    def test_completed_old_durable_retry_and_resume_409(self, make_server, tmp_path) -> None:
+        from format_converter.ai_jobs import AIJobStore
+        store = AIJobStore(tmp_path / ".formatconverter-jobs")
+        web_id, _ = self._seed_old_target(store, tmp_path, completed=True)
+        server, port = self._server_for(make_server, store)
+
+        status, _, _ = _request(port, "GET", f"/api/jobs/{web_id}")
+        assert status == 404
+
+        status, _, data = _request(port, "POST", f"/api/jobs/{web_id}/retry")
+        assert status == 409
+        import json as _json
+        assert "retryable" in _json.loads(data.decode("utf-8"))["error"]
+
+        status, _, data = _request(port, "POST", f"/api/jobs/{web_id}/resume")
+        assert status == 409
+        assert "not in interrupted state" in _json.loads(data.decode("utf-8"))["error"]
+        # The completed checkpoint is untouched.
+        assert store.find_by_web_job_id(web_id) != []
+
+    def test_unknown_old_id_still_404(self, make_server, tmp_path) -> None:
+        from format_converter.ai_jobs import AIJobStore
+        store = AIJobStore(tmp_path / ".formatconverter-jobs")
+        unknown = "a" * 32
+        server, port = self._server_for(make_server, store)
+        assert _request(port, "POST", f"/api/jobs/{unknown}/retry")[0] == 404
+        assert _request(port, "POST", f"/api/jobs/{unknown}/resume")[0] == 404
+        assert _request(port, "DELETE", f"/api/jobs/{unknown}")[0] == 404
