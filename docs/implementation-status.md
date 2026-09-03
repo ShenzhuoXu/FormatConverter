@@ -482,3 +482,44 @@ main 代理审阅 + 独立安全审查 + 独立复审确认的修复，全部包
 ### 注意事项
 - 未 push、未 tag、未建 Release、未改写历史；未使用真实 API Key；未引入外部资源 / 浏览器持久化存储 / 新依赖；CLI 行为零改动。
 - 「最近任务」只反映当前服务进程；服务重启后旧任务可消失（输出在临时目录中，符合预期）。`rg` 在 PowerShell 不可用，改用等价 ripgrep 核对；全仓无真实 Key 形状，`ORCAROUTER_API_KEY` 赋值仅 `sk-test-*` 测试假值与占位符。
+
+---
+
+## Step 5 — 发布整理：MIT License + README 重写 + 发布文档（docs-only）
+
+### 状态：✅ 验收通过（2026-09-03；未 push / 未 tag / 未建 Release / 未使用真实 API Key）
+
+### 范围
+- 仅**文档与发布整理**，业务代码零改动：新增根目录 MIT `LICENSE`；重写 `README.md`；更新 `CHANGELOG.md`；同步 `docs/release-checklist.md`、`docs/verification-checklist.md`；对 durable AI 任务（额外扩展，见下）如实记录并纳入验收，不归入 Step 4、也不改动其代码。
+- **本步未修改 `format_converter/` 下任何模块，未回滚 / 未改写任何历史提交。**
+
+### 提交
+- `dfe8f6c` `docs: polish README and add MIT license` —— Step 5 内容提交（5 文件，+350/−299：`LICENSE` 新增；`README.md`、`CHANGELOG.md`、`docs/release-checklist.md`、`docs/verification-checklist.md` 修改）。
+- 本文件（`docs/implementation-status.md`）的该 Step 5 记录为提交后单独追加，随另一条 `docs:` 记录提交入库。
+
+### 改动内容
+- `LICENSE`（新增）：根目录标准 MIT License 文本，`Copyright (c) 2026 FormatConverter contributors`；不含真实姓名 / 邮箱 / API Key / 本机路径。
+- `README.md`（重写，约 250 行）：按「简介 / 功能概览 / 快速开始 / Web UI 使用说明 / CLI 使用说明 / AI 校对说明 / 隐私、安全与限制 / 常见问题 / 开发与测试 / 项目结构 / License」组织；Web UI 明确四种任务类型、多文件选择、单文件直接下载、多文件 ZIP 且根目录不含 `input/`/`output/`、按钮固定「下载结果」；CLI 逐条与 `cli.py` argparse 一致并明确 `ai-clean` 为**单文件**；AI 校对如实写明 Key 优先级（环境变量 > `.env` > 未配置）、`.env` 是明文本地配置、模型名记忆 / 删除、连接测试会发真实请求且可能产生费用、Web 多文件 vs CLI 单文件、检查点 / 继续 / 重试 / 删除（仅 Web）；无 badge、覆盖率、下载量、Stars、在线 Demo、截图或未验证 URL；无真实 Key / key-shaped 测试值 / 绝对用户路径。
+- `CHANGELOG.md`：[Unreleased] 增补 durable AI 检查点 / 续跑 / 重试 / 删除与逐块瞬时错误重试的事实记录（此前 `fac8813` 已实现但未记入 Changelog），并新增「文档与发布整理（Step 5）」条目；未删除任何历史版本记录。
+- `docs/release-checklist.md`（重写）：去掉旧固定“254 passed”，改为「0 failed / 0 error（Step 5 实测 472 passed）」；全部验证命令改为 **Windows PowerShell 可执行**（`Remove-Item` / `git grep` 等，弃 Unix-only `rm -rf`/`env -u`）；保留 `.env` 允许存在但必须 gitignored 且不跟踪的规则；新增 `LICENSE` 存在性与标准 MIT 文本检查、README 文件引用 / 命令 / 下载行为一致性检查、AI 检查点 / resume / retry / delete 行为检查；保留「不得 push / 不得 tag / 不得建 Release / 不得使用真实 API Key」红线。
+- `docs/verification-checklist.md`（重写）：统一「下载结果」语义（单文件直接下载、多文件才 ZIP，不再把“下载 ZIP”当单文件行为）；自动化验收与手工验收分开标注，不伪造浏览器手工验收；自动化矩阵给出对应测试模块；手工验收增补：多文件下载 ZIP、刷新 / 模式切换后最近任务恢复、AI 任务「继续处理 / 重试 / 删除（弹窗确认）」、模型名记忆 / 删除、连接测试费用提示；并修正了对既有 Step 4 / 4.1 UI 的过时描述（四种任务类型分段控制器 + 多文件 + 最近任务）。
+- `docs/implementation-status.md`（本记录，追加）：不修改任何历史 Step 记录，仅在文末追加。
+
+### 功能基线说明：durable AI 任务为额外扩展（非本步代码，单独记录）
+- durable AI 检查点 / resume / retry / delete 由既有提交实现并已在仓库历史中，但**从未写入本文件的 Step 记录**，也不属于任何已记录的 Step 4 代码改动，因此在此单独说明、不归入 Step 4：
+  - `fac8813` `feat: add durable AI task checkpoints with resume, retry, and delete`（含此前 `e110da0` `fix: reject key-shaped AI model names` 与 `d1c165d` `test: avoid key-shaped literal in model store tests`）。它新增 `format_converter/ai_jobs.py`（`AIJobStore`：manifest / input / separators / chunks / results / final 的原子写检查点）、`jobs.py`（`JobStatus.interrupted`、`current`/`total` 进度、hydration 与 `resume_ai_job` / `retry_ai_job` / `delete_ai_web_job`）、`web_server.py`（`POST /api/jobs/{id}/resume|retry`、`DELETE /api/jobs/{id}`）、`model_store.py`（拒绝 `sk-…` 模型名）、前端「继续处理 / 重试 / 删除」与 `AI 校对中 · N / M` 进度，并扩展 `.gitignore`（`.formatconverter-jobs/`）。
+  - 影响与边界：仅 Web 端 AI 校对任务持久化；CLI `ai-clean` 仍单文件直调、无检查点；检查点 / manifest 不落 API Key；`resume`/`retry` 复用已完成块、不重复请求（不重复计费）。
+  - 测试影响：该扩展带来新增测试（含 `tests/test_ai_jobs.py` 全部用例与 `tests/test_jobs.py` / `tests/test_web_server.py` 的续跑 / 删除用例），是当前全量测试数达到 472 的主要来源之一。
+- 本步（Step 5）只记录与发布整理该功能，**未改动其代码**；README / CHANGELOG / release-checklist / verification-checklist 均依真实代码与测试行为描述（如状态文案「继续处理 / 重试 / 删除」逐字取自 `app.js`）。
+
+### 测试证据（最终门禁）
+- 全量 pytest（`-q -p no:cacheprovider --basetemp .pytest-tmp-step5`，串行）→ **472 passed，0 failed / 0 error**；另在无 `ORCAROUTER_API_KEY` 环境下重跑同样全绿（证明测试不依赖真实 Key、无真实网络）。
+- `compileall -q .` → 0；`node --check format_converter\web\static\app.js` → 通过；`git diff --check` → 通过（仅 autocrlf LF→CRLF 提示，非错误）。
+- 一致性核对：`git ls-files LICENSE README.md CHANGELOG.md docs` 确认新文件入库；`git check-ignore .env .formatconverter-models.json .formatconverter-jobs` 全部命中；全仓（README / docs / CHANGELOG）无真实 Key、无 key-shaped 值、无 `C:\Users\` 绝对路径、无虚假链接；README 引用文件均真实存在；`.pytest-tmp-step5` 已删除。
+- 工作树在本步两笔提交后为空；两笔提交均未 push、未 tag、未建 Release。
+
+### 审查结论（本步为文档主导，主 agent 汇总 + 一致性审计）
+- 逐文件审计：README 引用的文件名全部存在且被跟踪（`LICENSE` / `main.py` / `启动图形界面.bat` / `format_converter/web_server.py` / `format_converter/cli.py` / `format_converter/web/static/app.js` / `.env.example` / `.github/workflows/tests.yml`）；五条 CLI 命令参数与 `cli.py` argparse 逐字一致；Web 下载行为（单文件直下 / 多文件 ZIP 根级命名 / 按钮「下载结果」）与 `web_server.py`、`app.js` 一致；`.env` / 模型记忆 / 检查点的 gitignored 规则与 `.gitignore`、`tests/test_security_invariants.py` 一致。
+- 未发现发布阻断级代码问题；durable AI 功能曾出现的一次全量失败（`tests/test_jobs.py::TestResume::test_resume_single_file_progress_is_per_file` 报 `[WinError 5]` 拒绝访问）经单独复跑 3 次全过，判定为 Windows Defender / 索引器对测试临时目录的**瞬态文件锁 flake**（与 Step 8 记录过的 `.env` 瞬时锁同类），非代码缺陷，随后全量重跑 472 passed。
+- **结论：验收通过，无 P0/P1/P2。** 未 push、未打 tag、未建 Release、未使用真实 API Key。
+
