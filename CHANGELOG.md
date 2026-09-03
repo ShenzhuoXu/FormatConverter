@@ -23,6 +23,16 @@
 - AI 连接测试：`POST /api/ai/connection-test` 用当前 Key 与当前模型做一次极小真实请求（`Reply with OK.`），成功返回 `{"ok": true}`，失败返回脱敏错误（未配置 Key / 认证失败 / 无权限 / 无法连接 / 限流 / 服务器错误 / 空响应），不把 Key、请求体、响应原文回显；写 / 测接口与 Key 端点一样要求会话令牌与回环 Host/Origin（缺失 403）。页面明确提示「测试会向 OrcaRouter 发起真实网络请求，可能产生费用」。
 - Web 前端支持多文件选择：文件选择框加 `multiple`，可一次选择多个文件（点击或拖拽）并统一通过 `uploads` 数组提交（单文件同样走 `uploads`，前端不再只读取第一个文件）。页面展示已选文件列表（文件名 / 大小 / 状态 / 移除按钮）、数量与总大小摘要、「清空列表」按钮；选择或拖拽时即校验扩展名（convert/pipeline→`.pdf`，clean/ai-clean→`.md`）、重复文件名（大小写不敏感）与空文件，任一不符即阻止提交并明确提示。
 - Web API 支持多文件上传：`POST /api/jobs` 现接受 `uploads` 数组字段（每项含 `filename` / `data_b64`），一次提交多个文件并按同一任务类型处理。`convert`/`clean`/`pipeline` 在多文件时切换为目录模式复用既有 worker；`ai-clean` 新增目录批量模式（遍历 `input_dir` 下 `.md`，逐个输出 `<stem>.ai.md`），单文件 CLI 契约不变。单次上传上限 50 个文件；同请求内文件名大小写不敏感去重；任一文件名/扩展名/base64 非法则整请求 400、不创建部分输出。旧单文件 `upload` 字段保持兼容（同时传 `upload` 与 `uploads` 返回 400）。
+- AI 任务可靠性（持久化检查点）：Web 端的 AI 校对任务（单个或多个文件）改为逐“块”调用 AI，并把清单、输入、分隔符、分块与每块结果**原子写入**项目根目录 gitignored 的 `.formatconverter-jobs/<任务>/` 检查点目录，完成后合并出 `final.md`；任务状态新增 `interrupted`（已中断），任务响应携带分块进度 `current`/`total`（页面显示 `AI 校对中 · N / M`）。
+- AI 任务继续处理 / 重试 / 删除：新增 `POST /api/jobs/{id}/resume`、`POST /api/jobs/{id}/retry`、`DELETE /api/jobs/{id}`；「最近任务」对已中断 AI 任务提供「继续处理」、对失败 AI 任务提供「重试」，两者都复用磁盘检查点——**已完成的块结果不重复请求、不重复计费**；删除同时清理临时输出目录与检查点（前端弹窗确认）。服务重启时把上次处于 running / merging 的检查点标记为 `interrupted` 并重新水合进「最近任务」，可继续处理。
+- AI 校对逐块瞬时错误自动重试：网络中断 / 限流 / 服务端 5xx 等瞬时错误最多重试 4 次（间隔约 1 / 2 / 4 秒）；认证失败、无权限、请求非法、模型不存在等非瞬时错误立即失败、不重试。`is_retryable_llm_error` 只把 `ConnectionFailedError` / `RateLimitError` / `ServerError` 判为可重试。
+- 模型名安全边界：模型名拒绝 `sk-…` 形状（避免把 API Key 误填成模型名），检查点 manifest 与任何写入文件都不含 API Key、Provider 原始响应等敏感内容（`tests/test_ai_jobs.py` 覆盖）。
+
+### 文档与发布整理（Step 5）
+
+- 新增根目录 MIT License（`LICENSE`），README 增加 License 章节并链接。
+- 重构 README：项目简介 / 功能概览 / 快速开始（BAT 与 PowerShell、访问地址）/ Web UI 使用说明（四种任务、多文件选择、单文件直接下载、多文件 ZIP 且根目录不含 `input/`、`output/`）/ CLI 用法 / AI 校对（Key 优先级、`.env`、模型记忆与删除、连接测试、CLI 单文件 vs Web 多文件、检查点与续跑）/ 隐私、安全与限制 / 常见问题 / 开发与测试 / 项目结构 / License。
+- 发布检查清单、验收清单与实现状态文档同步当前行为（当前全量测试数、批量下载规则、AI 检查点 / 续跑 / 重试 / 删除能力、LICENSE 核验）。
 
 ### 移除
 

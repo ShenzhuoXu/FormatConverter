@@ -1,117 +1,119 @@
-# FormatConverter 验收清单（Step 6：补测试与修复）
+# FormatConverter 验收清单（Step 5 发布前）
 
-> 本清单记录 Step 6 的**自动化验收结果**与**手工验收项**。自动化部分全部在本机（Windows 11，Python 3.13，venv）离线运行通过；手工部分标注「待用户执行」。
+> 本清单把**自动化验收**与**手工验收**分开标注：
+>
+> - **一、自动化验收结果**：本机（Windows 11，Python 3.13，venv）离线实测通过（2026-09-03，全量 **472 passed / 0 failed / 0 error**；另在无 `ORCAROUTER_API_KEY` 环境下重跑同样全绿）。每项由对应测试模块自动覆盖。
+> - **二、手工验收项（待用户执行）**：真实浏览器点击 / 双击 BAT 的体验验收。**尚未在浏览器中人工执行**，自动化仅用 `http.client` / 静态断言复现了同一条 API 流程，故不标注为“已通过”。
 
 ---
 
-## 一、自动化验收结果
+## 一、自动化验收结果（本机实测通过）
 
-最终门禁：`pytest` → **198 passed**（基线 170 + 新增 28）；`compileall -q .` → 0；`git diff --check` → 通过。
-另在 `ORCAROUTER_API_KEY` **未设置**环境下重跑全量 → **198 passed**（证明测试套件不依赖真实 Key、无真实网络调用）。
+最终门禁：`pytest -q -p no:cacheprovider --basetemp .pytest-tmp-step5` → **472 passed**；`compileall -q .` → 0；`node --check format_converter\web\static\app.js` → 通过；`git diff --check` → 通过。
 
 ### 1. CLI（convert / marker / clean / pipeline / ai-clean）
 
 | 验收项 | 覆盖文件 / 用例 | 结果 |
 | ---- | ---- | ---- |
-| 五条命令参数解析 | `tests/test_cli.py::TestParser` | ✅ 既有 |
-| `ai-clean` 的 `main()` 端到端（成功 / 坏 Provider / 缺 Key / 覆盖保护 / 非 .md / 非 UTF-8） | `tests/test_cli.py::TestMainAIClean` | ✅ 既有 |
-| **`convert` / `clean` / `pipeline` / `marker` 的 `main()` 端到端 wiring**（monkeypatch 假转换/清理函数，断言返回码与输出） | `tests/test_cli_commands.py`（16 条，新增） | ✅ 新增通过 |
-| `convert` 空目录 / 无 PDF | `tests/test_cli_commands.py::TestConvertMain::test_convert_empty_directory_returns_zero` / `test_convert_directory_with_non_pdf_files_returns_zero` | ✅ 新增通过（rc=0，打印 0 个文件） |
-| `convert` / `clean` 缺失文件、`pipeline` 缺失目录、`marker` 错误的错误处理路径 | `tests/test_cli_commands.py`（`pytest.raises` 文档化既有契约） | ✅ 新增通过（保持既有行为：异常向上传播，**未改动 CLI 行为**） |
+| 五条命令参数解析与默认路径 | `tests/test_cli.py` | ✅ |
+| `convert` / `clean` / `pipeline` / `marker` / `ai-clean` 的 `main()` 端到端 wiring | `tests/test_cli_commands.py`、`tests/test_cli.py` | ✅ |
+| `ai-clean`：坏 Provider / 缺 Key / 覆盖保护 / 非 `.md` / 非 UTF-8 / 纯空白输入 / CRLF 保留 | `tests/test_cli.py`、`tests/test_ai_cleaner.py` | ✅ |
+| `ai-clean` 只处理**单文件**（无目录批量、无检查点能力） | `tests/test_cli.py` | ✅ |
+| 分块：代码块整体不跨块、不可再分超大块报错不截断、失败不写输出 | `tests/test_ai_cleaner.py` | ✅ |
+| 瞬时错误自动重试 / 非瞬时错误不重试 | `tests/test_llm_client.py`、`tests/test_ai_cleaner.py` | ✅ |
 
-### 2. Web（localhost 任务 API）
-
-| 验收项 | 覆盖文件 / 用例 | 结果 |
-| ---- | ---- | ---- |
-| health（正面 + 无 CORS） | `tests/test_web_server.py::TestHealthAndIndex` | ✅ 既有 |
-| 上传（clean 正面 e2e + 各类 400 负面） | `tests/test_web_server.py::TestSubmitAndDownload` / `TestValidation` / `TestFailures` | ✅ 既有 |
-| **413 超大请求体** | `tests/test_web_server.py::TestOversizedBody::test_oversized_request_body_413` | ✅ 新增通过 |
-| **convert / pipeline / ai-clean 三条全流程 e2e（上传→状态→下载）** | `tests/test_web_server.py::TestAdditionalE2E` | ✅ 新增通过 |
-| 任务状态（正面 + 未知 job 404） | `tests/test_web_server.py` | ✅ 既有 |
-| 下载（单文件直下载 / 多文件 ZIP 根级条目 + 未知 404 + 未完成 409 + 失败 409） | `tests/test_web_server.py::TestSubmitAndDownload` / `TestFailures` / `TestDownloadRules` | ✅ 既有 |
-| **下载：succeeded 但无输出文件 → 404** | `tests/test_web_server.py::TestAdditionalE2E::test_download_succeeded_but_no_output_files_404` | ✅ 新增通过 |
-| **上传安全（非法文件名 / 扩展名 / 空上传 / 非对象 params）** | `tests/test_web_server.py::TestValidation` | ✅ 既有 |
-| **布尔字符串形近值（`"false"`）不翻转行为** | `tests/test_web_server.py::TestAdditionalE2E::test_string_bool_lookalikes_do_not_flip_behavior` | ✅ 新增通过 |
-| `cleanup_job`（合法删除 / 非法 id 不删）与 `shutdown` 临时根清理 | `tests/test_web_server.py::TestSecurity` | ✅ 既有 |
-
-### 3. AI（可选校对）
+### 2. Web 任务 API（localhost，批量 / 下载 / 恢复）
 
 | 验收项 | 覆盖文件 / 用例 | 结果 |
 | ---- | ---- | ---- |
-| 无 Key → `MissingApiKeyError`（CLI / jobs / Web 三层） | `tests/test_providers.py`、`tests/test_cli.py`、`tests/test_jobs.py`、`tests/test_web_server.py` | ✅ 既有 |
-| 坏 Provider（非 orcarouter） | `tests/test_providers.py::TestProviderLookup`、`tests/test_cli.py` | ✅ 既有 |
-| 分块失败传播、不写输出 | `tests/test_ai_cleaner.py::TestCleanMarkdownWithAI::test_any_chunk_failure_propagates`、`tests/test_cli.py::TestAIClean::test_failure_does_not_write_output` | ✅ 既有 |
-| 非 `.md` 输入拒绝（大小写后缀） | `tests/test_cli.py::TestAIClean` | ✅ 既有 |
-| LF / CRLF / lone-CR 换行保留（分块层 + `ai_clean` 集成层） | `tests/test_ai_cleaner.py::TestSplitIntoChunks`、`tests/test_cli.py::TestAIClean::test_crlf_input_preserves_crlf_in_output` | ✅ 既有 |
-| **纯空白输入：原样写出、不调客户端** | `tests/test_cli.py::TestAIClean::test_whitespace_only_input_written_verbatim_without_client` | ✅ 新增通过 |
-| 超大块（不可分块段落）→ `ChunkTooLargeError` | `tests/test_ai_cleaner.py::TestSplitIntoChunks`、`tests/test_cli.py::TestAIClean::test_oversized_block_fails_without_writing` | ✅ 既有 |
+| health、静态资源、首页 | `tests/test_web_server.py`、`tests/test_web_ui.py` | ✅ |
+| `uploads` 多文件上传（convert/clean/pipeline/ai-clean）与旧 `upload` 兼容 | `tests/test_web_server.py` | ✅ |
+| 非法文件名 / 扩展名 / 重复名 / 空上传 / 无效 base64 / 超大请求体 → 400/413 且不写部分输出 | `tests/test_web_server.py` | ✅ |
+| **下载规则**：单文件成功 → 直接返回该文件（非 ZIP）；多文件 → ZIP 且**根目录不含 `input/`/`output/`**、同名稳定重命名、绝不静默覆盖 | `tests/test_web_server.py`（`TestDownloadRules`） | ✅ |
+| 未完成 409 / 未知 404 / 成功但无输出 404 | `tests/test_web_server.py` | ✅ |
+| **最近任务**：`GET /api/jobs` 恢复列表（不含输出路径）、刷新/切换不丢任务 | `tests/test_web_server.py`、`tests/test_web_ui.py` | ✅ |
+| **AI 检查点 / 续跑 / 重试 / 删除**：`resume`/`retry`/`DELETE /api/jobs/{id}` 路由与状态机（interrupted→继续、failed→重试、终态→删除；queued/running 拒绝删除；复用已完成块不重复请求） | `tests/test_web_server.py`、`tests/test_jobs.py`、`tests/test_ai_jobs.py` | ✅ |
+| 服务重启恢复：running/merging 检查点 → `interrupted` 并重新水合 | `tests/test_ai_jobs.py`、`tests/test_jobs.py` | ✅ |
+| `cleanup_job` / `shutdown` 临时目录清理；job_id 路径穿越防护 | `tests/test_web_server.py` | ✅ |
 
-### 4. 安全
+### 3. Web UI 前端（静态与行为）
 
 | 验收项 | 覆盖文件 / 用例 | 结果 |
 | ---- | ---- | ---- |
-| 127.0.0.1 绑定 / 非 loopback 拒绝 | `tests/test_web_server.py::TestSecurity`、`tests/test_launcher.py` | ✅ 既有 |
-| 无 CORS 头（成功 / 400 / 404 / 409 / 下载） | `tests/test_web_server.py::TestHealthAndIndex`、`test_web_ui.py` | ✅ 既有 |
-| **无真实 Key 落盘（全仓扫描：`sk-<12+ alnum>` 与 `ORCAROUTER_API_KEY = "<非占位符>"`）** | `tests/test_security_invariants.py::TestNoKeyOnDisk`（新增） | ✅ 新增通过 |
-| **`.idea/`、`.pytest-tmp`、`__pycache__`、`.pytest_cache` 不在 git 跟踪** | `tests/test_security_invariants.py::TestNoKeyOnDisk::test_no_ide_or_cache_artifacts_tracked`（新增） | ✅ 新增通过 |
-| 无 Key 前端存储（localStorage / Cookie / Key 输入框） | `tests/test_web_ui.py::TestPageSourceCompliance` | ✅ 既有 |
-| **模块依赖守卫：核心模块顶层无 requests/httpx/openai/pymupdf4llm/marker/socket/http.client** | `tests/test_security_invariants.py::TestNoNetworkImports`（新增，AST 扫描） | ✅ 新增通过 |
-| **全新解释器导入 web_server/jobs 不加载任何网络客户端** | `tests/test_security_invariants.py::TestNoNetworkImports::test_fresh_import_loads_no_network_clients`（新增，子进程验证） | ✅ 新增通过 |
-| 测试套件无需真实 Key（`ORCAROUTER_API_KEY` 未设置全量仍绿） | 门禁重跑（见本文件顶部） | ✅ 通过 |
+| 四种任务类型分段控制器 + 单一工作面板 + 多文件选择（`multiple`、文件列表/摘要/清空/逐条移除） | `tests/test_web_ui.py` | ✅ |
+| 扩展名 / 重复名 / 空文件即时校验 | `tests/test_web_ui.py` | ✅ |
+| 下载按钮文案固定为「下载结果」，页面无“下载 ZIP”按钮 | `tests/test_web_ui.py` | ✅ |
+| 无浏览器持久化存储 / 无第三方资源 / 无 `console.log` / 仅同源 `/static/` 与 `/api/` | `tests/test_web_ui.py` | ✅ |
+| `app.js` 语法：`node --check` | `tests/test_web_ui.py` 与门禁 | ✅ |
+| 提交 → 轮询 → 下载端到端（clean 全流程；uploads 单文件） | `tests/test_web_ui.py`、`tests/test_web_server.py` | ✅ |
+
+### 4. AI（Key 优先级 / 模型记忆 / 连接测试 / 检查点安全）
+
+| 验收项 | 覆盖文件 / 用例 | 结果 |
+| ---- | ---- | ---- |
+| Key 优先级：环境变量 `ORCAROUTER_API_KEY` > 项目根 `.env` > 未配置 | `tests/test_env_store.py`、`tests/test_providers.py` | ✅ |
+| `.env` 读写：只改/删 `ORCAROUTER_API_KEY` 行、逐字保留其它行、CRLF/非 UTF-8 字节保留、原子写 + 瞬时锁重试 | `tests/test_env_store.py` | ✅ |
+| Key 端点会话令牌 + 回环 Host/Origin 校验；任何响应不含 Key | `tests/test_web_server.py` | ✅ |
+| 模型名记忆 `.formatconverter-models.json`：保存/删除/列表/去重/上限/拒绝 `sk-…` 形状 | `tests/test_model_store.py`、`tests/test_web_server.py` | ✅ |
+| 连接测试：极小真实请求（`Reply with OK.`）、成功 `ok:true`、失败脱敏映射、需令牌 | `tests/test_web_server.py` | ✅ |
+| 缺 Key：CLI / jobs / Web 三层在任何网络请求前失败；消息只含变量名 | `tests/test_cli.py`、`tests/test_jobs.py`、`tests/test_web_server.py` | ✅ |
+| 检查点不落 Key / 原始响应；manifest 不含敏感内容 | `tests/test_ai_jobs.py` | ✅ |
+
+### 5. 安全与仓库不变量
+
+| 验收项 | 覆盖文件 / 用例 | 结果 |
+| ---- | ---- | ---- |
+| 仅监听 `127.0.0.1`；非回环（`0.0.0.0` / `::` / `127.0.0.1.evil`）拒绝 | `tests/test_web_server.py`、`tests/test_launcher.py` | ✅ |
+| 无 CORS 头（成功 / 400 / 404 / 409 / 下载 / 静态） | `tests/test_web_server.py`、`tests/test_web_ui.py` | ✅ |
+| git 跟踪文件扫描无真实 Key / 无 `.idea` / 无缓存与测试临时目录 | `tests/test_security_invariants.py` | ✅ |
+| `.env`、`.formatconverter-models.json`、`.formatconverter-jobs` 未被跟踪、被忽略 | `tests/test_security_invariants.py`、`tests/test_env_store.py` | ✅ |
+| 核心模块顶层无网络库 / 全新解释器导入不加载网络客户端 | `tests/test_security_invariants.py` | ✅ |
+| 测试不依赖真实 Key：无 `ORCAROUTER_API_KEY` 环境全量仍绿 | 门禁重跑 | ✅ |
 
 ---
 
 ## 二、手工验收项（待用户执行）
 
-> 以下为**真实浏览器 / 双击体验**验收，自动化已用 `http.client` 复现同一 API 流程，但真实点击与双击体验需用户确认。
+> 在真实浏览器 / 双击环境下逐项人工核对（自动化未覆盖“真人点击”与“真实双击”体验）。
 
 1. **双击 `启动图形界面.bat` 一键启动**
-   - 预期：弹出命令行服务窗口，显示「Using Python …」「Starting FormatConverter local service …」「服务已就绪：http://127.0.0.1:8765/」「按 Ctrl+C 停止」，并自动打开默认浏览器访问 `http://127.0.0.1:8765/`。
-   - 验证：服务窗口保持前台运行；浏览器打开后出现「FormatConverter」四张功能卡片页面。
-2. **四张功能卡片流程**（在打开的页面中）
-   - ① PDF 转 Markdown：选一个 `.pdf`，提交后轮询到成功，点「下载结果」直接得到 `.md`。
-   - ② Markdown 清理：选一个 `.md`（含重复段落），提交后下载，确认重复段落被去重且页面有 `.bak.md` 备份。
-   - ③ 转换后清理（流水线）：选一个 `.pdf`，提交后下载，确认转换+清理一次完成。
-   - ④ AI 校对：选一个 `.md`、填模型名；未设置 `ORCAROUTER_API_KEY` 时应看到缺 Key 的失败提示；设置后（`$env:ORCAROUTER_API_KEY="你的-key"`）成功并下载 `.ai.md`。
-3. **停止方式**：在服务窗口按 **Ctrl+C**，确认窗口打印「收到 Ctrl+C，正在停止服务...」后退出；再次启动不报端口占用。
-4. **端口占用行为**：先用任意程序占用 `8765` 再双击 BAT，确认服务改用 `8766` 等备用端口并提示「端口 8765 被占用，改用端口 …」；若 `8765` 已被本服务实例占用，确认「服务已在运行」复用现有实例、不重复启动。
-5. **依赖缺失提示**：临时把 `.venv` 改名后双击 BAT，确认打印 Python/依赖缺失提示与可复制的安装命令（`python -m venv .venv`、`pip install -r requirements.txt` 等）后退出。
+   - 预期：弹出服务窗口，打印 Python 探测与「服务已就绪：http://127.0.0.1:8765/」「按 Ctrl+C 停止」，自动打开浏览器；保持窗口前台运行。
+2. **四种任务 + 多文件选择**（页面 http://127.0.0.1:8765/）
+   - ① PDF 转 Markdown：一次选 2 个以上 `.pdf` → 文件列表显示数量/大小/可逐条移除 → 提交后处理成功。
+   - ② Markdown 清理：选含重复段落的 `.md` → 确认去重、断行合并、列表保留。
+   - ③ 转换后清理流水线：选 `.pdf` → 一次完成转换 + 清理。
+   - ④ AI 校对：选 `.md`、填模型名；未配置 Key 时应有缺 Key 失败提示；配置后成功。
+   - 校验体验：选错扩展名 / 同名不同大小写 / 0 字节文件时页面即时给中文错误并阻止提交。
+3. **下载结果**
+   - 只选 1 个文件成功后点「下载结果」→ 直接得到该文件（`.md`，**不是 ZIP**）。
+   - 选多个文件成功后点「下载结果」→ 得到 ZIP，**根目录直接是 `a.md` 等文件名，不含 `input/` / `output/`**。
+   - 按钮文字始终为「下载结果」；页面任何位置不出现「下载 ZIP」按钮文案。
+4. **最近任务 / 刷新恢复**
+   - 任务「处理中」时切换到其它任务类型再切回 → 该任务仍在并继续更新。
+   - 任务完成后按 F5 刷新页面（服务不重启）→ 最近任务仍在；成功任务可再点「下载结果」；运行中任务刷新后继续轮询。
+5. **AI 任务中断 → 继续处理（断点续跑）**
+   - 提交一个较长的 AI 校对任务，处理中在服务窗口按 Ctrl+C 停止；重新双击启动服务 → 「最近任务」出现「已中断」任务，点「继续处理」从断点续跑（已完成的块不重复请求）。
+6. **AI 任务失败 → 重试**
+   - 让 AI 任务失败（如断网或模型不可用），确认任务行显示「重试」；修复后点「重试」恢复。
+7. **删除（含确认弹窗）**
+   - 对成功/失败/已中断任务点「删除」→ 有确认弹窗；确认后任务行消失、再次刷新不出现（输出与检查点已清除）。
+8. **模型名记忆与连接测试**
+   - 「AI 校对」填模型名 → 点「保存模型」提示已保存；重启服务后仍可从下拉历史选择；「删除模型」后消失。
+   - 有效 Key + 模型点「测试连接」→ 显示「连接正常」；未配置 Key / 无效模型 → 显示脱敏错误；页面文字须说明测试会发起真实网络请求、可能产生费用。
+9. **停止与端口占用**
+   - 服务窗口按 Ctrl+C → 打印「收到 Ctrl+C，正在停止服务...」后退出；再次启动不报端口占用。
+   - 先用其它程序占用 `8765` 再启动 → 改用备用端口并提示；`8765` 已被本服务占用 → 提示「服务已在运行」并复用现有实例。
+10. **依赖缺失提示**：临时把 `.venv` 改名后双击 BAT → 打印 Python/依赖缺失提示与可复制的安装命令后退出。
 
 ---
 
-## 三、安全清单证据与结论
+## 三、文档一致性核对结果（Step 5，本机核对）
 
-| 项 | 证据 | 结论 |
-| ---- | ---- | ---- |
-| 仅监听回环 | `serve()` 硬绑定 `("127.0.0.1", port)`；`_is_loopback` 用 `ipaddress.is_loopback` 严格解析；`0.0.0.0`/`::`/`127.0.0.1.evil` 均被拒（测试覆盖） | ✅ |
-| 无 CORS | 所有响应路径不写 `Access-Control-Allow-Origin`（测试对成功/400/404/409/下载实测） | ✅ |
-| 无 Key 落盘 | 全仓 git 跟踪文件扫描：无 `sk-[A-Za-z0-9]{12,}`，无 `ORCAROUTER_API_KEY = "<非占位符>"`；README 仅出现占位符「你的-key」；测试用 `sk-test*` 短假值不被误报 | ✅ |
-| 无 Key 前端存储 | `index.html` / `app.js` 无 localStorage、Cookie、Key 输入框、外部 CDN/链接（页面合规测试 + `node --check`） | ✅ |
-| 无真实网络调用 | 核心模块顶层仅 import 标准库 + 本包；`openai`/`pymupdf4llm`/`marker` 全部函数内惰性导入；全新解释器导入 `web_server`/`jobs` 后 `sys.modules` 无任何网络客户端；测试全离线只连 `127.0.0.1` | ✅ |
-| 测试不依赖真实 Key | 环境无 `ORCAROUTER_API_KEY` 时全量 198 测试全绿 | ✅ |
-
----
-
-## 四、Step 4 重设计手工验收项（多文件可选，待用户执行）
-
-> Web UI 重设计后（顶部任务类型切换 + 单一工作面板 + 多文件选择），在打开的 `http://127.0.0.1:8765/` 页面上手工验证：
-
-1. **多文件选择**：点击「PDF 转 Markdown」→ 点击或拖拽一次选择 **2 个以上 `.pdf`**，确认页面出现文件列表，显示数量、总大小与「清空列表」按钮；每个文件一行，可单独移除（×）。
-2. **单文件下载直接 `.md`**：只选 1 个 `.pdf` 处理成功后，点「下载结果」，确认直接得到 `.md` 文件（不是 ZIP）。
-3. **多文件下载 ZIP**：选多个 `.pdf`（或 `.md`）处理成功后，点「下载结果」，确认得到 ZIP 压缩包。
-4. **下载按钮文字**：确认按钮始终为「下载结果」，页面任何位置不出现「下载 ZIP」按钮文案。
-5. **扩展名 / 重复名 / 空文件校验**：在「Markdown 清理」下选一个 `.pdf`，或同选 `A.md` 与 `a.md`，或选一个 0 字节文件，确认页面立即给出中文错误提示并阻止「开始处理」。
-6. **模式切换**：切到「AI 校对」时 API Key 配置区与模型名输入展开；切回其它模式时折叠，已选文件列表保持不变（仅按新扩展名规则重新标记）。
-7. **AI Key 行为不退化**：「AI 校对」下保存 Key 后输入框清空、状态灯变绿；清除后恢复；全程不出现 `console.log`。
-
----
-
-## 五、Step 4.1 手工验收项（任务恢复 / 模型记忆 / 连接测试，待用户执行）
-
-> Web UI 增加「最近任务」区、AI 模型名本地记忆与「测试连接」后，在打开的 `http://127.0.0.1:8765/` 页面上手工验证：
-
-1. **任务运行中切换模式后返回**：提交一个任务（如 Markdown 清理），在「处理中」时切换到其它任务类型再切回来，确认「最近任务」区仍显示该任务且状态继续更新（处理中 → 成功）。
-2. **刷新页面后最近任务可见**：任务完成后按 F5 刷新页面（服务不重启），确认「最近任务」区仍列出该任务；成功任务点「下载结果」可直接下载；运行中任务刷新后继续轮询到完成。
-3. **保存模型后重启仍可选择**：在「AI 校对」填模型名 → 点「保存模型」，确认提示已保存；重启服务（Ctrl+C 后重新启动）再进「AI 校对」，确认模型名仍可从下拉列表选择。
-4. **删除模型后列表移除**：选中一个已保存模型 → 点「删除模型」，确认提示已删除且下拉列表中不再出现。
-5. **测试连接成功 / 失败均有明确提示**：配置了有效 Key 与模型时点「测试连接」→ 显示「连接正常」；未配置 Key 或模型无效时 → 显示脱敏错误（如「未配置 API Key。」「认证失败」等），且页面文字明确说明该操作会发起真实网络请求、可能产生费用。
+| 核对项 | 结果 |
+| ---- | ---- |
+| 根目录存在标准 MIT `LICENSE`（含 `Copyright (c) 2026 FormatConverter contributors`）且 README 链接它 | ✅ |
+| README 引用文件名均真实存在、CLI 命令与 argparse 一致 | ✅ |
+| README / CHANGELOG / docs 无“下载 ZIP”作为单文件行为的过时表述；按钮统一「下载结果」 | ✅ |
+| README / docs 无旧固定测试数量（如 254 passed）；无真实 Key、无绝对用户路径、无虚假链接 | ✅ |
+| `.env` / `.formatconverter-models.json` / `.formatconverter-jobs` 未被 Git 跟踪 | ✅ |
+| 全量 pytest / compileall / node --check / git diff --check 通过 | ✅ |
