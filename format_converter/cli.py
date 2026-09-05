@@ -166,8 +166,11 @@ def ai_clean(
 
     # newline="" keeps CRLF/CR line endings untranslated so the AI proofreader
     # (and therefore the output) preserves the input's newline style exactly.
+    # Path.read_text only accepts newline on Python 3.13+; open() supports it
+    # on every version we test, so read through open() instead.
     try:
-        markdown = input_path.read_text(encoding="utf-8", newline="")
+        with input_path.open(encoding="utf-8", newline="") as handle:
+            markdown = handle.read()
     except UnicodeDecodeError as exc:
         raise EncodingError(
             f"Could not decode {input_path} as UTF-8. "

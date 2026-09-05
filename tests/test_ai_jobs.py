@@ -41,7 +41,10 @@ class TestCreateJob:
         )
         job_dir = store.job_dir(manifest.job_id)
         assert (job_dir / "manifest.json").is_file()
-        assert (job_dir / "input.md").read_text(encoding="utf-8", newline="") == "One.\n\nTwo."
+        # open(newline="") rather than Path.read_text(newline=...), which only
+        # supports newline on Python 3.13+.
+        with (job_dir / "input.md").open(encoding="utf-8", newline="") as handle:
+            assert handle.read() == "One.\n\nTwo."
         assert (job_dir / "chunks" / "0001.txt").is_file()
         assert (job_dir / "chunks" / "0002.txt").is_file()
         assert (job_dir / "chunks" / "0001.txt").read_text(encoding="utf-8") == "One.\n"
