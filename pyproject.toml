@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mdforge"
+version = "0.1.0"
+description = "..."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+fast    = ["pymupdf", "pymupdf4llm"]
+office  = ["markitdown"]
+quality = ["docling"]
+dev     = ["pytest"]
+
+[project.scripts]
+mdforge = "mdforge.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
